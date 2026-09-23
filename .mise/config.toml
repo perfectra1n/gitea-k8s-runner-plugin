@@ -100,7 +100,8 @@ description = "Fail if generated protocol code is stale (CI drift guard)"
 run = """
 set -eu
 buf generate
-drift=$(git status --porcelain -- ':(glob)gen/**/*.pb.go')
+# Regenerated output vs the index (== HEAD in CI), plus files never added.
+drift=$(git diff --name-only -- ':(glob)gen/**/*.pb.go'; git ls-files --others --exclude-standard -- ':(glob)gen/**/*.pb.go')
 if [ -n "$drift" ]; then
   echo "$drift"
   echo "gen/ is stale: run 'mise run gen' and commit" >&2
@@ -125,19 +126,26 @@ description = "Regenerate runner/patches from the commits on top of UPSTREAM in 
 run = "sh runner/scripts/refresh.sh"
 
 [tasks."runner:gen"]
-description = "Regenerate the vendored protocol code inside .build/runner (commit it there, then runner:refresh)"
-run = "buf generate --template buf.gen.runner.yaml"
+description = "Copy proto/ into .build/runner (go_package rewritten) and regenerate with upstream's `make generate-plugin-proto`; commit it there, then runner:refresh"
+dir = "{{config_root}}/.build/runner"
+env = { GOWORK = "off" }
+run = """
+set -eu
+sed 's#^option go_package = .*#option go_package = "gitea.com/gitea/runner/act/plugin/proto/v1alpha;pluginv1alpha";#' \
+  ../../proto/plugin/v1alpha/plugin.proto >act/plugin/proto/plugin/v1alpha/plugin.proto
+make generate-plugin-proto
+"""
 
 [tasks."runner:gen-check"]
-description = "Fail if the patch series' vendored protocol code differs from proto/ (drift guard)"
+description = "Fail if the patch series' proto or generated code differs from proto/ (drift guard, via upstream's make target)"
 depends = ["runner:apply"]
 run = """
 set -eu
-buf generate --template buf.gen.runner.yaml
+mise run runner:gen
 drift=$(git -C .build/runner status --porcelain -- act/plugin/proto)
 if [ -n "$drift" ]; then
   echo "$drift"
-  echo "vendored proto in the runner patches is stale: mise run runner:gen, commit in .build/runner, mise run runner:refresh" >&2
+  echo "the runner patches' protocol is stale: mise run runner:gen, commit in .build/runner, mise run runner:refresh" >&2
   exit 1
 fi
 """

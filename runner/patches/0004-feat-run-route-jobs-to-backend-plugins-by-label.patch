@@ -9,6 +9,79 @@ for a job whose first matching runs-on entry is a plugin label.
 
 Assisted-by: Claude Code:claude-opus-5-5
 
+diff --git a/docs/backend-plugins.md b/docs/backend-plugins.md
+new file mode 100644
+index 0000000..c1ad25a
+--- /dev/null
++++ b/docs/backend-plugins.md
+@@ -0,0 +1,67 @@
++# Backend plugins
++
++A backend plugin is an out-of-process service that owns the environment a job runs in: a Kubernetes pod, a VM, a sandbox. The runner keeps doing everything else (claiming tasks, fetching actions, evaluating expressions, sequencing steps, streaming logs) and hands only the container operations to the plugin over gRPC: create and start an environment, run a command in it, copy files in and out, and remove it.
++
++The protocol is `plugin.v1alpha` ([`act/plugin/proto/plugin/v1alpha/plugin.proto`](../act/plugin/proto/plugin/v1alpha/plugin.proto)). It is wire-compatible with Forgejo runner's backend plugins, so plugins written for either runner work with both.
++
++## Configuring a plugin
++
++Plugins are declared under `plugins` in the runner config (see [config.example.yaml](../internal/pkg/config/config.example.yaml)), each with the address it listens on and options passed to it verbatim with every job:
++
++```yaml
++plugins:
++  k8s:
++    address: unix:///run/plugin/plugin.sock
++    options:
++      namespace: ci-jobs
++runner:
++  labels:
++    - "small:k8s:/podspecs/small.yaml"
++    - "large:k8s:/podspecs/large.yaml"
++```
++
++| Setting | Meaning |
++| --- | --- |
++| `plugins.<name>.address` | `unix:///path` or `tcp://host:port`. The runner speaks plain gRPC over HTTP/2 without TLS, so keep the plugin on a local socket or a trusted network. |
++| `plugins.<name>.options` | String key/values the runner sends with every job; their meaning is up to the plugin. |
++
++A plugin name may not be `host` or `docker` and may not contain a colon. The runner checks the configuration when it loads, but it only connects to a plugin when a job needs it, so a plugin can start after the runner.
++
++## Routing jobs with labels
++
++A label `<name>:<plugin>[:<arg>]` whose middle segment is a configured plugin sends jobs whose `runs-on` matches `<name>` to that plugin, together with `<arg>`. What the argument means is up to the plugin; the example above uses it to pick a pod template. The runner registers and declares such a label by its name, like any other label.
++
++For a job, the first `runs-on` entry this runner has a label for decides, as for host and docker labels: if that label is a plugin label the job runs on the plugin, otherwise on the host or in Docker. A label whose middle segment is not a configured plugin, like `pool:e57e18d4-…`, is still kept verbatim as an opaque host label.
++
++A runner whose labels are all plugin labels does not need a Docker daemon.
++
++## What a job gets
++
++- The job's `container:` image, if any, and its `services:` (image, environment and ports) are sent to the plugin, which decides how to realise them. `container.credentials` and the services' credentials, volumes, command and options cannot be expressed in the protocol and are ignored with a warning; give the plugin its own registry credentials instead.
++- The plugin reports the environment's layout (workspace root, tool cache, temp directory, OS and architecture); `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` come from it.
++- The job's timeout is sent as the environment's maximum lifetime.
++- The environment is removed when the job ends, including when it fails to start or is cancelled.
++
++`uses: docker://…` steps and Docker or Dockerfile actions need a Docker daemon the runner can reach, which a plugin environment does not provide. They fail with `docker actions are not supported on the <plugin> backend plugin`. Steps can still run `docker` themselves if the plugin environment provides a daemon.
++
++## Writing a plugin
++
++A plugin serves the `plugin.v1alpha.BackendPlugin` gRPC service (and should serve `grpc.health.v1`). The comments in the `.proto` file are the contract. In short:
++
++| RPC | Contract |
++| --- | --- |
++| `Capabilities` | Returns the backend's name; called when the runner connects. |
++| `Create` | Registers an environment and returns its id and filesystem layout; nothing needs to run yet. |
++| `Start` | Boots the environment, streaming progress lines, and ends with `StartComplete` carrying the image's environment. |
++| `Exec` | Runs a command and streams its output, ending with `ExecComplete{exit_code}` when the command ran (whatever its exit code) or `ExecFailed` when it could not run. A cancelled stream means the command must be stopped. |
++| `CopyIn` | Receives one tar stream; only the first chunk carries the environment id and destination directory. |
++| `CopyOut` | Sends a tar of a path, rooted at its base name like `docker cp`. |
++| `Remove` | Destroys the environment; idempotent. |
++
++For one environment the runner sends one RPC at a time, except that `Remove` may arrive while a cancelled stream is still unwinding. Errors are gRPC statuses: `NotFound` for an unknown environment and `InvalidArgument` for a malformed request; the status message is shown in the job log.
++
++[`act/plugin/plugintest`](../act/plugin/plugintest) contains an in-process fake plugin that the runner's own tests use and that can serve as a reference.
++
++## Regenerating the protocol code
++
++After changing the `.proto` file, run `make generate-plugin-proto` to regenerate `act/plugin/proto/v1alpha`. Field numbers and reserved ranges are fixed by compatibility and must never change.
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
 index 787f4a6..c1b15c0 100644
 --- a/internal/app/cmd/daemon.go
@@ -168,3 +241,16 @@ index 7400d20..c86f70c 100644
  		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
  		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
  		Vars:                              task.Vars,
+diff --git a/internal/pkg/config/config.example.yaml b/internal/pkg/config/config.example.yaml
+index 7bca6af..be84c97 100644
+--- a/internal/pkg/config/config.example.yaml
++++ b/internal/pkg/config/config.example.yaml
+@@ -304,7 +304,7 @@ metrics:
+ # Out-of-process backend plugins, which run jobs in environments they own (a
+ # Kubernetes pod, a VM, ...). A runner label "<name>:<plugin>[:<arg>]" routes
+ # jobs to the plugin, passing <arg> along. The protocol is plugin.v1alpha,
+-# compatible with Forgejo runner's backend plugins.
++# compatible with Forgejo runner's backend plugins. See docs/backend-plugins.md.
+ #plugins:
+ #  k8s:
+ #    # unix:///path or tcp://host:port, plain gRPC without TLS.
