@@ -124,6 +124,24 @@ run = "sh runner/scripts/apply.sh"
 description = "Regenerate runner/patches from the commits on top of UPSTREAM in .build/runner"
 run = "sh runner/scripts/refresh.sh"
 
+[tasks."runner:gen"]
+description = "Regenerate the vendored protocol code inside .build/runner (commit it there, then runner:refresh)"
+run = "buf generate --template buf.gen.runner.yaml"
+
+[tasks."runner:gen-check"]
+description = "Fail if the patch series' vendored protocol code differs from proto/ (drift guard)"
+depends = ["runner:apply"]
+run = """
+set -eu
+buf generate --template buf.gen.runner.yaml
+drift=$(git -C .build/runner status --porcelain -- act/plugin/proto)
+if [ -n "$drift" ]; then
+  echo "$drift"
+  echo "vendored proto in the runner patches is stale: mise run runner:gen, commit in .build/runner, mise run runner:refresh" >&2
+  exit 1
+fi
+"""
+
 [tasks."runner:test"]
 description = "Apply the series to a fresh upstream clone, then vet + run upstream's own test suite (docker tests self-skip)"
 depends = ["runner:apply"]
@@ -138,6 +156,13 @@ run = [
   # gitignored .mise/config.local.toml, never here: CI runs everything.
   "go test -race -timeout 20m -parallel 8 ${RUNNER_TEST_SKIP:+-skip \"$RUNNER_TEST_SKIP\"} ./...",
 ]
+
+[tasks."runner:lint"]
+description = "Lint the patched upstream tree with upstream's own golangci config (same pinned version)"
+depends = ["runner:apply"]
+dir = "{{config_root}}/.build/runner"
+env = { GOWORK = "off" }
+run = "golangci-lint run ./..."
 
 [tasks."runner:build"]
 description = "Apply the series and build the patched runner binary into .build/bin/gitea-runner"
@@ -157,5 +182,5 @@ depends = ["image-plugin", "image-runner"]
 
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
-depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test", "runner:test"]
+depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test", "runner:test", "runner:lint", "runner:gen-check"]
 run = "echo '✓ local CI gate passed'"

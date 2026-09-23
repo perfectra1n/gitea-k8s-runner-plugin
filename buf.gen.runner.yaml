@@ -1,0 +1,18 @@
+version: v2
+# Generates the vendored copy of the protocol inside the patched upstream
+# clone (.build/runner/act/plugin/proto/v1alpha), using connect-go's gRPC
+# client — upstream already depends on connect, so the patch adds no new
+# module. Same .proto, so the wire format is identical to gen/.
+managed:
+  enabled: true
+  override:
+    - file_option: go_package
+      path: plugin/v1alpha/plugin.proto
+      value: gitea.com/gitea/runner/act/plugin/proto/v1alpha;pluginv1alpha
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: .build/runner
+    opt: module=gitea.com/gitea/runner
+  - local: ["go", "tool", "protoc-gen-connect-go"]
+    out: .build/runner
+    opt: module=gitea.com/gitea/runner

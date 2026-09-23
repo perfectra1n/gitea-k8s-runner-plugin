@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	connectrpc.com/connect v1.21.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
@@ -16,6 +17,7 @@ require (
 )
 
 tool (
+	connectrpc.com/connect/cmd/protoc-gen-connect-go
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )

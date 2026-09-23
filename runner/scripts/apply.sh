@@ -34,12 +34,13 @@ git checkout --quiet --force --no-track -B patched "refs/tags/$tag"
 # (used by upstream's tests to derive GITHUB_SHA/ref) rejects as invalid.
 git config --remove-section branch.patched 2>/dev/null || true
 git clean --quiet -fdx
-git config user.name "gitea-k8s-runner-plugin"
-git config user.email "noreply@github.com"
 
 set -- "$root"/runner/patches/*.patch
 if [ -e "$1" ]; then
-  git am --quiet --committer-date-is-author-date "$@"
+  # Patch authorship is preserved; only the committer needs an identity.
+  git -c user.name="${GIT_COMMITTER_NAME:-gitea-k8s-runner-plugin}" \
+    -c user.email="${GIT_COMMITTER_EMAIL:-noreply@github.com}" \
+    am --quiet --committer-date-is-author-date "$@"
 fi
 git rev-parse HEAD >.git/series-applied
 echo "applied $(git rev-list --count "refs/tags/$tag..HEAD") patch(es) onto gitea/runner $tag in $dir"
