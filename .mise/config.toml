@@ -110,7 +110,11 @@ fi
 
 [tasks.build]
 description = "Build the plugin binary into .build/bin"
-run = "go build -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-plugin"
+run = "go build -ldflags='-s -w' -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-plugin"
+
+[tasks.image-plugin]
+description = "Build the plugin image (IMAGE_PREFIX/IMAGE_TAG override the ghcr.io name and :dev tag)"
+run = "docker build -f plugin/Dockerfile -t ${IMAGE_PREFIX:-ghcr.io/perfectra1n}/gitea-k8s-runner-plugin:${IMAGE_TAG:-dev} ."
 
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"

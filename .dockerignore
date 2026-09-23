@@ -1,0 +1,6 @@
+.build/
+.superpowers/
+.git/
+charts/
+test/
+docs/
