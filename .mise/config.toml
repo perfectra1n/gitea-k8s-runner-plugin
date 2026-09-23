@@ -56,11 +56,28 @@ description = "Hermetic unit tests for the protocol and plugin modules (no clust
 env = { CGO_ENABLED = "1" }
 run = "go test -race -count=1 ./gen/... ./plugin/..."
 
+[tasks.gen]
+description = "Generate Go code from proto/ with buf (protoc plugins via `go tool`, no network)"
+run = ["buf lint", "buf generate"]
+
+[tasks.gen-check]
+description = "Fail if generated protocol code is stale (CI drift guard)"
+run = """
+set -eu
+buf generate
+drift=$(git status --porcelain -- ':(glob)gen/**/*.pb.go')
+if [ -n "$drift" ]; then
+  echo "$drift"
+  echo "gen/ is stale: run 'mise run gen' and commit" >&2
+  exit 1
+fi
+"""
+
 [tasks.build]
 description = "Build the plugin binary into .build/bin"
 run = "go build -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-plugin"
 
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
-depends = ["fmt-check", "lint", "test"]
+depends = ["fmt-check", "gen-check", "lint", "test"]
 run = "echo '✓ local CI gate passed'"

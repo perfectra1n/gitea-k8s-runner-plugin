@@ -1,0 +1,10 @@
+version: v2
+# Codegen plugins are Go tool dependencies of gen/go.mod, so generation needs
+# no remote plugins and no network.
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "tool", "protoc-gen-go-grpc"]
+    out: gen
+    opt: paths=source_relative

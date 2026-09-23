@@ -1,0 +1,209 @@
+// SPDX-License-Identifier: MIT
+//
+// Backend plugin protocol for Gitea's runner. A runner hands the container
+// operations of a workflow job (create, start, exec, copy, remove) to an
+// out-of-process backend over gRPC; everything else (claiming tasks, resolving
+// actions, sequencing steps, streaming logs) stays in the runner.
+//
+// This file is written independently for gitea-k8s-runner-plugin. The package,
+// service, RPC and message names and every field number (including the
+// reserved ranges) match Forgejo runner's `plugin.v1alpha`, so runners and
+// plugins from either project interoperate on the wire. Do not renumber;
+// gen/plugin/v1alpha/wire_test.go pins the tags.
+
+syntax = "proto3";
+
+package plugin.v1alpha;
+
+option go_package = "github.com/perfectra1n/gitea-k8s-runner-plugin/gen/plugin/v1alpha;pluginv1";
+
+import "google/protobuf/duration.proto";
+
+// BackendPlugin owns execution environments (one per workflow job). Servers
+// also serve grpc.health.v1.
+//
+// Per environment, the runner issues RPCs one at a time. The exception is a
+// streaming RPC the runner cancels (job cancelled or timed out): it may call
+// Remove before the cancelled handler has finished unwinding, so servers
+// should serialise work per environment.
+//
+// Errors are gRPC statuses. NotFound means an unknown environment_id,
+// InvalidArgument a malformed request, and Unavailable that the plugin is
+// gone. The status message is shown to the user in the job log.
+service BackendPlugin {
+  // Capabilities identifies the backend. Called once per connection.
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+
+  // Create registers an environment and reports its filesystem layout. It
+  // does not boot anything yet.
+  rpc Create(CreateRequest) returns (CreateResponse);
+
+  // Start boots the environment and returns once it can run commands,
+  // streaming progress lines meanwhile. A cancelled stream means the job was
+  // cancelled: stop booting; Remove follows.
+  rpc Start(StartRequest) returns (stream StartOutput);
+
+  // Exec runs one command and streams its output. A cancelled stream means
+  // the command must be killed; servers should watch the stream context
+  // rather than wait for a failed write, as commands can be silent for long.
+  rpc Exec(ExecRequest) returns (stream ExecOutput);
+
+  // CopyIn receives one tar archive and extracts it inside the environment.
+  rpc CopyIn(stream CopyInChunk) returns (CopyInResponse);
+
+  // CopyOut sends a tar archive of a path inside the environment.
+  rpc CopyOut(CopyOutRequest) returns (stream CopyOutChunk);
+
+  // Remove destroys the environment. Idempotent.
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesResponse {
+  // 2-7 once described the environment layout, which now comes per
+  // environment in CreateResponse.
+  reserved 2, 3, 4, 5, 6, 7;
+  // Backend name, used in logs (e.g. "kubernetes").
+  string name = 1;
+}
+
+// A `services:` entry of the workflow job.
+message ServiceContainer {
+  // The service id (the key under `services:`).
+  string name = 1;
+  // Image reference; its meaning is up to the backend.
+  string image = 2;
+  map<string, string> env = 3;
+  // Port mappings as written in the workflow ("5432", "8080:80", "53/udp").
+  repeated string ports = 4;
+}
+
+message CreateRequest {
+  // 3 and 4 carried env and working dir, which travel with each ExecRequest.
+  reserved 3, 4;
+  // Job container image (`container:`), or empty for the backend default.
+  string image = 1;
+  // Runner-chosen name, unique per job.
+  string name = 2;
+  // Advisory capability changes; backends may ignore them.
+  repeated string cap_add = 5;
+  repeated string cap_drop = 6;
+  repeated ServiceContainer services = 7;
+  // Opaque, backend-specific options from the runner's plugin config.
+  map<string, string> backend_options = 8;
+  // The part of the runs-on label after `<name>:<plugin>:`, possibly empty.
+  string label_arg = 9;
+  // Upper bound on the environment's lifetime.
+  google.protobuf.Duration environment_timeout = 10;
+}
+
+message CreateResponse {
+  // Handle for every later RPC on this environment.
+  string environment_id = 1;
+  // Parent directory of the job workspace.
+  string root_path = 2;
+  // Where the runner stages its own files and action code.
+  string act_path = 3;
+  // RUNNER_TOOL_CACHE.
+  string tool_cache_path = 4;
+  // RUNNER_TEMP.
+  string temp_path = 5;
+  // Name of the search-path variable; "PATH" when unset.
+  optional string path_variable_name = 6;
+  // Search path used when the job sets none.
+  optional string default_path_variable = 7;
+  // Separator between search-path entries; ":" when unset.
+  optional string path_separator = 8;
+  // True where variable names are case-insensitive (Windows).
+  bool environment_case_insensitive = 9;
+  // RUNNER_OS and RUNNER_ARCH.
+  string os = 10;
+  string arch = 11;
+}
+
+message StartRequest {
+  string environment_id = 1;
+}
+
+message StartOutput {
+  oneof Output {
+    // Progress text.
+    DataChunk data = 1;
+    // Final message on success.
+    StartComplete start_complete = 2;
+  }
+}
+
+message StartComplete {
+  // Environment baked into the job image. The runner applies it beneath the
+  // job's own variables.
+  map<string, string> image_env = 1;
+}
+
+message ExecRequest {
+  string environment_id = 1;
+  // argv; command[0] is the program.
+  repeated string command = 2;
+  map<string, string> env = 3;
+  // User to run as; unset means the backend default.
+  optional string user = 4;
+  // Working directory; empty means the backend default.
+  string workdir = 5;
+}
+
+message ExecOutput {
+  oneof Output {
+    DataChunk data = 1;
+    // Final message: the command ran and exited with this code.
+    ExecComplete exec_complete = 2;
+    // Final message: the command could not be run at all.
+    ExecFailed exec_failed = 3;
+  }
+}
+
+message DataChunk {
+  enum Stream {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  Stream stream = 1;
+  bytes data = 2;
+}
+
+message ExecComplete {
+  int32 exit_code = 1;
+}
+
+message ExecFailed {
+  string error_message = 1;
+}
+
+// One frame of a CopyIn upload. Only the first frame names environment_id and
+// dest_path; later frames that set them are rejected with InvalidArgument.
+// The data of all frames concatenates to one tar stream, extracted under
+// dest_path (created if missing).
+message CopyInChunk {
+  optional string environment_id = 1;
+  optional string dest_path = 2;
+  bytes data = 3;
+}
+
+message CopyInResponse {}
+
+message CopyOutRequest {
+  string environment_id = 1;
+  // Path to archive, inside the environment.
+  string src_path = 2;
+}
+
+message CopyOutChunk {
+  // A slice of the tar stream.
+  bytes data = 1;
+}
+
+message RemoveRequest {
+  string environment_id = 1;
+}
+
+message RemoveResponse {}
