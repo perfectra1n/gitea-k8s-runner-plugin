@@ -15,6 +15,10 @@ helm install runner oci://ghcr.io/perfectra1n/charts/gitea-runner-k8s \
   --set gitea.existingSecret=gitea-runner-token
 ```
 
+## Examples
+
+Tested examples live in the repository's [`examples/`](https://github.com/perfectra1n/gitea-k8s-runner-plugin/tree/main/examples) directory: every values file there is linted and rendered in CI, and the end-to-end suite installs [`examples/values/classes.yaml`](https://github.com/perfectra1n/gitea-k8s-runner-plugin/blob/main/examples/values/classes.yaml) in a kind cluster and runs the example workflows against a real Gitea.
+
 ## Job classes
 
 Each entry of `classes` becomes a ConfigMap `<release>-podspec-<name>` and runner labels `<name>:k8s:/podspecs/<name>/podspec.yaml` plus one per alias. The podspec is a plain `corev1.PodSpec`. The container named `main` runs the steps and needs `/bin/sh`, `env` and `tar`; one is added with the job's `container:` image if the podspec has none. `schedulerName`, `priorityClassName`, affinity, `imagePullSecrets` and extra sidecars (e.g. a dind sidecar for `docker build`) pass through unchanged. A volume named `shared`, if declared, holds the workspace (for example an ephemeral PVC); otherwise a 10Gi `emptyDir` is used.

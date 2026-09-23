@@ -186,6 +186,8 @@ run = [
   "helm dependency build charts/gitea-runner-k8s",
   "helm lint --strict charts/gitea-runner-k8s -f charts/gitea-runner-k8s/tests/values-test.yaml",
   "sh charts/gitea-runner-k8s/tests/assert.sh",
+  # Every documented example must lint and render as-is.
+  "for f in examples/values/*.yaml; do echo \"lint $f\"; helm lint --strict --quiet charts/gitea-runner-k8s -f \"$f\" && helm template ex charts/gitea-runner-k8s -f \"$f\" >/dev/null || exit 1; done",
 ]
 
 [tasks.helm-docs]
@@ -198,6 +200,31 @@ run = """
 set -eu
 helm-docs --chart-search-root charts
 git diff --exit-code -- charts/gitea-runner-k8s/README.md || { echo "chart README is stale: run 'mise run helm-docs'" >&2; exit 1; }
+"""
+
+[tasks."release:images"]
+description = "Build and push multi-arch images tagged $IMAGE_TAG (release workflow; needs buildx + registry login)"
+depends = ["runner:apply"]
+run = """
+set -eu
+: "${IMAGE_TAG:?set IMAGE_TAG to the release version}"
+prefix=${IMAGE_PREFIX:-ghcr.io/perfectra1n}
+platforms=${PLATFORMS:-linux/amd64,linux/arm64}
+docker buildx build --platform "$platforms" --push -f plugin/Dockerfile \
+  -t "$prefix/gitea-k8s-runner-plugin:$IMAGE_TAG" .
+docker buildx build --platform "$platforms" --push --target basic --build-arg "VERSION=$IMAGE_TAG" \
+  -t "$prefix/gitea-runner-k8s:$IMAGE_TAG" .build/runner
+"""
+
+[tasks."release:chart"]
+description = "Package the chart and push it to oci://ghcr.io/perfectra1n/charts (release workflow)"
+run = """
+set -eu
+helm dependency build charts/gitea-runner-k8s
+rm -rf "$BUILD_DIR/chart" && mkdir -p "$BUILD_DIR/chart"
+helm package charts/gitea-runner-k8s -d "$BUILD_DIR/chart"
+printf '%s' "$HELM_REGISTRY_PASSWORD" | helm registry login ghcr.io -u "$HELM_REGISTRY_USER" --password-stdin
+helm push "$BUILD_DIR"/chart/*.tgz "oci://${CHART_REGISTRY:-ghcr.io/perfectra1n/charts}"
 """
 
 [tasks.ci]
