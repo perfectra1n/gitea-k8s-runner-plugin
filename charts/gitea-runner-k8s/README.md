@@ -43,9 +43,7 @@ classes:
 
 Kubernetes: `>=1.31.0-0`
 
-| Repository | Name | Version |
-|------------|------|---------|
-| oci://ghcr.io/bjw-s-labs/helm | common | 5.2.1 |
+The chart is built on the [bjw-s common library chart](https://github.com/bjw-s-labs/helm-charts/tree/main/charts/library/common); `Chart.yaml` pins its version.
 
 ## Values
 

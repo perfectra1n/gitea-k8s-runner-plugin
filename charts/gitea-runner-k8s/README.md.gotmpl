@@ -39,6 +39,10 @@ classes:
           env: [{name: DOCKER_TLS_CERTDIR, value: ""}]
 ```
 
-{{ template "chart.requirementsSection" . }}
+## Requirements
+
+{{ template "chart.kubeVersionLine" . }}
+
+The chart is built on the [bjw-s common library chart](https://github.com/bjw-s-labs/helm-charts/tree/main/charts/library/common); `Chart.yaml` pins its version.
 
 {{ template "chart.valuesSection" . }}
