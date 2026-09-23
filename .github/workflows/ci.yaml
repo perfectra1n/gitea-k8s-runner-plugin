@@ -22,6 +22,8 @@ jobs:
     # parallel. Locally, `mise run ci` runs all of them.
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
+    env:
+      RUNNER_TEST_SKIP: ${{ matrix.runner_test_skip }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +40,9 @@ jobs:
             tasks: test
           - name: Upstream runner suite with patches
             tasks: "runner:test ::: runner:lint"
+            # Chowns a socket to another uid, which needs root; GitHub runs
+            # jobs as an unprivileged user (upstream's CI runs as root).
+            runner_test_skip: "^TestDockerProxyWithDaemon$"
           - name: Helm chart
             tasks: "helm-lint ::: helm-docs-check"
     steps:

@@ -162,7 +162,9 @@ run = [
   # RUNNER_TEST_SKIP (a `go test -skip` regex) is for hosts where pristine
   # upstream itself fails (e.g. NixOS: /bin/sh is bash). Set it in the
   # gitignored .mise/config.local.toml, never here: CI runs everything.
-  "go test -race -timeout 20m -parallel 8 ${RUNNER_TEST_SKIP:+-skip \"$RUNNER_TEST_SKIP\"} ./...",
+  # Upstream's host-environment tests assume $SHELL is unset, as in upstream's
+  # CI containers (TestRunEventHostEnvironment/defaults-run reads it).
+  "env -u SHELL go test -race -timeout 20m -parallel 8 ${RUNNER_TEST_SKIP:+-skip \"$RUNNER_TEST_SKIP\"} ./...",
 ]
 
 [tasks."runner:lint"]

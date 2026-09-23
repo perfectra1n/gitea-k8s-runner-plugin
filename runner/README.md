@@ -22,7 +22,7 @@ mise run runner:test      # re-apply to a fresh clone and run upstream's suite
 
 `runner:apply` refuses to discard uncommitted work or commits that are not in `patches/` yet (use `FORCE=1` to discard them). After changing `proto/`, run `mise run runner:gen`: it copies the `.proto` into the clone (rewriting `go_package`) and runs upstream's `make generate-plugin-proto`. Commit the result there and refresh; `mise run runner:gen-check` fails when the two differ.
 
-Upstream tests that fail on the pristine tag on a particular host (for example on NixOS, where `/bin/sh` is bash) can be skipped locally with `RUNNER_TEST_SKIP`, a `go test -skip` regex, in the gitignored `.mise/config.local.toml`. CI runs everything.
+Some upstream tests depend on the machine rather than the code: `TestDockerProxyWithDaemon` needs root, and the host-environment tests assume `/bin/sh` is not bash and that `$SHELL` is unset (`runner:test` unsets it). `RUNNER_TEST_SKIP`, a `go test -skip` regex, skips such tests: CI sets it to `^TestDockerProxyWithDaemon$` because GitHub runs jobs as an unprivileged user, and on other hosts (for example NixOS, where `/bin/sh` is bash) set it in the gitignored `.mise/config.local.toml`.
 
 ## Upstreaming
 
