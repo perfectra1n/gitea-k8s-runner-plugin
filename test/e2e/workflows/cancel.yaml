@@ -1,0 +1,17 @@
+# The harness pushes twice to cancel-trigger/. The first run sleeps; the
+# second (commit message "cancel-now") cancels it via cancel-in-progress and
+# finishes at once. The cancelled run's job pod must be removed.
+name: cancel
+on:
+  push:
+    paths: [cancel-trigger/**]
+concurrency:
+  group: cancel-e2e
+  cancel-in-progress: true
+jobs:
+  sleep:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ !contains(github.event.head_commit.message, 'cancel-now') }}
+        run: echo started; sleep 900
+      - run: echo done

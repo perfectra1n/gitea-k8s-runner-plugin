@@ -1,17 +1,10 @@
 {{ template "chart.header" . }}
 
-{{ template "chart.versionBadge" . }}{{ template "chart.typeBadge" . }}{{ template "chart.appVersionBadge" . }}
-
 {{ template "chart.description" . }}
 
-The runner (a patched `gitea/runner` with backend plugin support) claims
-tasks from Gitea as usual. Each workflow job runs as its own `batch/v1` Job
-built from the podspec of the job class its `runs-on` label names. The
-Kubernetes backend plugin runs as a native sidecar next to the runner.
+The runner (a patched `gitea/runner` with backend plugin support) claims tasks from Gitea as usual. Each workflow job runs as its own `batch/v1` Job built from the podspec of the job class its `runs-on` label names. The Kubernetes backend plugin runs as a native sidecar next to the runner.
 
-The chart is built on the [bjw-s common library](https://github.com/bjw-s-labs/helm-charts):
-the values below are turned into bjw-s values, and any bjw-s key you set
-(`controllers`, `persistence`, `defaultPodOptions`, ...) is merged on top.
+The chart is built on the [bjw-s common library](https://github.com/bjw-s-labs/helm-charts): the values below are turned into bjw-s values, and any bjw-s key you set (`controllers`, `persistence`, `defaultPodOptions`, ...) is merged on top.
 
 ## Install
 
@@ -24,15 +17,7 @@ helm install runner oci://ghcr.io/perfectra1n/charts/gitea-runner-k8s \
 
 ## Job classes
 
-Each entry of `classes` becomes a ConfigMap `<release>-podspec-<name>` and
-runner labels `<name>:k8s:/podspecs/<name>/podspec.yaml` plus one per alias.
-The podspec is a plain `corev1.PodSpec`. The container named `main` runs the
-steps and needs `/bin/sh`, `env` and `tar`; one is added with the job's
-`container:` image if the podspec has none. `schedulerName`,
-`priorityClassName`, affinity, `imagePullSecrets` and extra sidecars (e.g.
-a dind sidecar for `docker build`) pass through unchanged. A volume named
-`shared`, if declared, holds the workspace (for example an ephemeral PVC);
-otherwise a 10Gi `emptyDir` is used.
+Each entry of `classes` becomes a ConfigMap `<release>-podspec-<name>` and runner labels `<name>:k8s:/podspecs/<name>/podspec.yaml` plus one per alias. The podspec is a plain `corev1.PodSpec`. The container named `main` runs the steps and needs `/bin/sh`, `env` and `tar`; one is added with the job's `container:` image if the podspec has none. `schedulerName`, `priorityClassName`, affinity, `imagePullSecrets` and extra sidecars (e.g. a dind sidecar for `docker build`) pass through unchanged. A volume named `shared`, if declared, holds the workspace (for example an ephemeral PVC); otherwise a 10Gi `emptyDir` is used.
 
 ```yaml
 classes:

@@ -1,0 +1,22 @@
+# Checkout, a JavaScript action from GitHub, and a local composite action,
+# on the default class (runs-on: ubuntu-latest is one of its aliases).
+name: basics
+on: [push]
+jobs:
+  basics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JavaScript action
+        uses: actions/github-script@v7
+        with:
+          script: core.info(`hello from ${context.repo.owner}/${context.repo.repo}`)
+      - name: Composite action from this repository
+        uses: ./.gitea/actions/greet
+        with:
+          who: kubernetes
+      - name: The job runs in its own pod
+        run: |
+          echo "runner.os=$RUNNER_OS workspace=$GITHUB_WORKSPACE"
+          test -f .gitea/actions/greet/action.yml
+          test -n "$KUBERNETES_SERVICE_HOST"

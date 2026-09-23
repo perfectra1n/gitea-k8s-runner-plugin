@@ -1,0 +1,9 @@
+# The smallest useful install: one job class (the default, on the act runner
+# image, answering runs-on: ubuntu-latest), job pods in the release namespace.
+#
+#   kubectl create secret generic gitea-runner-registration \
+#     --from-literal=token=<registration token from Gitea>
+#   helm install runner oci://ghcr.io/perfectra1n/charts/gitea-runner-k8s -f minimal.yaml
+gitea:
+  url: https://gitea.example.com
+  existingSecret: gitea-runner-registration

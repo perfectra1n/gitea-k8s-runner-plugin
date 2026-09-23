@@ -1,0 +1,11 @@
+# Overlay on examples/values/classes.yaml for the kind cluster: the in-cluster
+# Gitea and the locally built :e2e images.
+gitea:
+  url: http://gitea.gitea.svc.cluster.local:3000
+runner:
+  image:
+    tag: e2e
+  logLevel: debug
+plugin:
+  image:
+    tag: e2e

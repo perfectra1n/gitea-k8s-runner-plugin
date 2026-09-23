@@ -1,0 +1,16 @@
+# The dind class carries a Docker daemon as a sidecar, so plain `docker`
+# commands work. (`uses: docker://` steps are not supported on the plugin.)
+name: docker-build
+on: [push]
+jobs:
+  build:
+    runs-on: dind
+    steps:
+      - name: Wait for the daemon
+        run: for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info
+      - name: Build an image
+        run: |
+          mkdir ctx
+          printf 'FROM alpine:3.22\nRUN echo built > /built\n' > ctx/Dockerfile
+          docker build -t e2e/demo ctx
+          docker run --rm e2e/demo cat /built

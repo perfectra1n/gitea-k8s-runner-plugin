@@ -1,0 +1,11 @@
+name: greet
+description: A local composite action
+inputs:
+  who:
+    description: Who to greet
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "hello, ${{ inputs.who }}"

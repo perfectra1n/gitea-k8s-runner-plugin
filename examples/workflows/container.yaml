@@ -1,0 +1,13 @@
+# `container:` replaces the class image for this job's `main` container.
+name: container
+on: [push]
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.22
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - run: grep -q Alpine /etc/os-release && cat /etc/alpine-release

@@ -1,0 +1,25 @@
+# Placement: everything in a podspec except the `main` command passes through
+# to the job pod, so classes can pin node pools, use a custom scheduler or a
+# priority class, and pull from private registries.
+gitea:
+  url: https://gitea.example.com
+  existingSecret: gitea-runner-registration
+
+plugin:
+  options:
+    # Extra labels on every job pod; ${ENV_ID} is the job's environment id.
+    labels: team=platform,gitea-job=${ENV_ID}
+
+classes:
+  - name: arm64
+    podspec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+        - {key: dedicated, operator: Equal, value: ci, effect: NoSchedule}
+      priorityClassName: ci-low
+      imagePullSecrets:
+        - name: registry-credentials
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04

@@ -1,0 +1,74 @@
+# Several job classes, job pods in their own namespace, a class with a
+# per-job PVC workspace and a class with a Docker daemon sidecar.
+#
+#   kubectl create namespace ci-jobs
+#   kubectl create secret generic gitea-runner-registration \
+#     --from-literal=token=<registration token from Gitea>
+#   helm install runner oci://ghcr.io/perfectra1n/charts/gitea-runner-k8s -f classes.yaml
+#
+# Workflows pick a class by name or alias: runs-on: ubuntu-latest, runs-on: large, runs-on: dind.
+gitea:
+  url: https://gitea.example.com
+  existingSecret: gitea-runner-registration
+
+runner:
+  # Job pods wait in Pending for cluster capacity, so this can be generous.
+  capacity: 20
+  timeout: 3h
+
+plugin:
+  options:
+    # How long a job pod may take to become ready (scheduling, image pulls).
+    ready_timeout: 15m
+    # Default requests/limits for `services:` sidecars.
+    service_resources: |
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 1Gi}
+
+jobNamespace: ci-jobs
+
+classes:
+  - name: ubuntu
+    aliases: [ubuntu-latest, ubuntu-24.04]
+    podspec:
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 4Gi}
+
+  # A bigger box whose workspace is a per-job PVC instead of an emptyDir.
+  - name: large
+    podspec:
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+          resources:
+            requests: {cpu: "2", memory: 4Gi}
+            limits: {memory: 8Gi}
+      volumes:
+        - name: shared
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests: {storage: 20Gi}
+
+  # `docker build` / `docker run` via a Docker-in-Docker native sidecar.
+  - name: dind
+    podspec:
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+          env:
+            - {name: DOCKER_HOST, value: "tcp://localhost:2375"}
+      initContainers:
+        - name: dind
+          image: docker:28-dind
+          restartPolicy: Always
+          env:
+            - {name: DOCKER_TLS_CERTDIR, value: ""}
+          securityContext:
+            privileged: true

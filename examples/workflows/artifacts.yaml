@@ -1,0 +1,12 @@
+# Artifacts upload to Gitea directly. Runs on the `large` class (per-job PVC workspace).
+name: artifacts
+on: [push]
+jobs:
+  upload:
+    runs-on: large
+    steps:
+      - run: echo "built by ${{ github.sha }}" > report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report.txt

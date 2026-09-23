@@ -69,6 +69,9 @@ controllers:
     strategy: Recreate
     serviceAccount:
       identifier: main
+    pod:
+      # The plugin talks to the API server with this pod's ServiceAccount.
+      automountServiceAccountToken: true
     initContainers:
       plugin:
         image:

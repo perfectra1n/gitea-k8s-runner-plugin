@@ -1,0 +1,24 @@
+# Service containers run as native sidecars in the job pod: reach them on
+# localhost, or by their service name like on the docker backend.
+name: services
+on: [push]
+jobs:
+  services:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432
+    steps:
+      - name: Reach postgres on localhost and by name
+        run: |
+          for host in localhost postgres; do
+            for i in $(seq 60); do
+              timeout 2 bash -c "</dev/tcp/$host/5432" && break
+              sleep 1
+            done
+            timeout 2 bash -c "</dev/tcp/$host/5432" && echo "postgres reachable at $host:5432"
+          done

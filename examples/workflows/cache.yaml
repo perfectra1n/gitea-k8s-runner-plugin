@@ -1,0 +1,23 @@
+# actions/cache talks to the runner's cache server through the chart's Service.
+name: cache
+on: [push]
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p cached && echo "${{ github.sha }}" > cached/sha
+      - uses: actions/cache/save@v4
+        with:
+          path: cached
+          key: e2e-${{ github.sha }}
+  restore:
+    needs: save
+    runs-on: ubuntu-latest
+    steps:
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cached
+          key: e2e-${{ github.sha }}
+          fail-on-cache-miss: true
+      - run: test "$(cat cached/sha)" = "${{ github.sha }}"

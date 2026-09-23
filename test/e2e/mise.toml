@@ -1,2 +1,102 @@
-# e2e harness tasks (kind + Gitea). Filled in by Task 9; invoke as
-# `mise run //test/e2e:test`.
+# End-to-end suite: a kind cluster, an in-cluster Gitea, the chart installed
+# from examples/values/classes.yaml, and the example workflows run for real.
+#
+# Monorepo subproject (enabled from the root .mise/config.toml). Run it all
+# with `mise run //test/e2e:test`, or one step at a time, e.g.
+# `mise run //test/e2e:cluster-create`. Every cluster-facing task pins an
+# ISOLATED KUBECONFIG under .build/e2e, so it can only touch the throwaway
+# gitea-k8s-e2e cluster, never your real contexts.
+
+[env]
+KUBECONFIG = "{{config_root}}/../../.build/e2e/kubeconfig"
+E2E_CLUSTER = "gitea-k8s-e2e"
+
+[tasks.cluster-create]
+description = "Create (or reuse a healthy) gitea-k8s-e2e kind cluster"
+dir = "{{config_root}}/../.."
+run = """
+set -eu
+mkdir -p "$(dirname "$KUBECONFIG")"
+if kind get clusters 2>/dev/null | grep -qx "$E2E_CLUSTER"; then
+  if kind export kubeconfig --name "$E2E_CLUSTER" >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1; then
+    echo "reusing kind cluster $E2E_CLUSTER"
+    exit 0
+  fi
+  echo "cluster $E2E_CLUSTER is unhealthy, recreating"
+  kind delete cluster --name "$E2E_CLUSTER"
+fi
+kind create cluster --name "$E2E_CLUSTER" --wait 120s
+"""
+
+[tasks.images]
+description = "Build the plugin and patched runner images tagged :e2e"
+dir = "{{config_root}}/../.."
+env = { IMAGE_TAG = "e2e" }
+run = ["mise run //:image-plugin", "mise run //:image-runner"]
+
+[tasks.images-load]
+description = "Load the :e2e images and pre-pull the job/service images into the kind node"
+dir = "{{config_root}}/../.."
+run = """
+set -eu
+for img in ghcr.io/perfectra1n/gitea-k8s-runner-plugin:e2e ghcr.io/perfectra1n/gitea-runner-k8s:e2e; do
+  docker image inspect "$img" >/dev/null 2>&1 || { echo "error: $img is not built; run mise run //test/e2e:images" >&2; exit 1; }
+done
+# Job images come from examples/values/classes.yaml and the example workflows;
+# preloading them keeps pod start times (and flakiness) down.
+for img in ghcr.io/catthehacker/ubuntu:act-24.04 postgres:17-alpine alpine:3.22 docker:28-dind docker.gitea.com/gitea:1.27.3-rootless; do
+  docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img"
+done
+kind load docker-image --name "$E2E_CLUSTER" \
+  ghcr.io/perfectra1n/gitea-k8s-runner-plugin:e2e ghcr.io/perfectra1n/gitea-runner-k8s:e2e \
+  ghcr.io/catthehacker/ubuntu:act-24.04 postgres:17-alpine alpine:3.22 docker:28-dind \
+  docker.gitea.com/gitea:1.27.3-rootless
+"""
+
+[tasks.gitea-up]
+description = "Deploy Gitea into the cluster and create the e2e admin user"
+dir = "{{config_root}}/../.."
+run = """
+set -eu
+kubectl apply -f test/e2e/manifests/gitea.yaml
+kubectl -n gitea rollout status deploy/gitea --timeout=300s
+kubectl -n gitea exec deploy/gitea -- gitea admin user create --admin \
+  --username e2e --password e2e-password-1234 --email e2e@example.com --must-change-password=false \
+  || kubectl -n gitea exec deploy/gitea -- gitea admin user list | grep -q '\\be2e\\b'
+"""
+
+[tasks.install]
+description = "Register a runner token and install the chart with examples/values/classes.yaml"
+dir = "{{config_root}}/../.."
+run = """
+set -eu
+kubectl create namespace ci-runner --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace ci-jobs --dry-run=client -o yaml | kubectl apply -f -
+token=$(kubectl -n gitea exec deploy/gitea -- gitea actions generate-runner-token | tail -1)
+kubectl -n ci-runner create secret generic gitea-runner-registration --from-literal=token="$token" \
+  --dry-run=client -o yaml | kubectl apply -f -
+helm dependency build charts/gitea-runner-k8s
+helm upgrade --install runner charts/gitea-runner-k8s -n ci-runner \
+  -f examples/values/classes.yaml -f test/e2e/values.yaml --wait --timeout 5m
+"""
+
+[tasks.run]
+description = "Push the workflows to Gitea and assert every run's outcome"
+dir = "{{config_root}}/../.."
+run = "sh test/e2e/run.sh"
+
+[tasks.test]
+description = "The whole e2e pipeline: cluster, images, Gitea, chart, workflows"
+dir = "{{config_root}}/../.."
+run = [
+  "mise run //test/e2e:cluster-create",
+  "mise run //test/e2e:images",
+  "mise run //test/e2e:images-load",
+  "mise run //test/e2e:gitea-up",
+  "mise run //test/e2e:install",
+  "mise run //test/e2e:run",
+]
+
+[tasks.cluster-delete]
+description = "Delete the gitea-k8s-e2e kind cluster"
+run = "kind delete cluster --name \"$E2E_CLUSTER\""

@@ -62,6 +62,7 @@ check "RoleBinding in jobNamespace binds the runner SA" "$f" \
 check "Role allows jobs, pods/exec and events" "$f" \
   '[select(.kind == "Role") | .rules[] | .resources[]] | (contains(["jobs"]) and contains(["pods/exec"]) and contains(["events"]))'
 check "pod uses the bound ServiceAccount" "$f" "[$deploy | .serviceAccountName == \"r-gitea-runner-k8s\"] | all"
+check "ServiceAccount token is mounted for the plugin" "$f" "[$deploy | .automountServiceAccountToken == true] | all"
 
 check "cache Service exists" "$f" '[select(.kind == "Service" and .metadata.name == "r-gitea-runner-k8s-cache") | .spec.ports[0].port == 8088] | length == 1'
 check "cache.host points at the Service" "$f" "[$cfg | .cache.host == \"r-gitea-runner-k8s-cache.ci-runner.svc.cluster.local\"] | all"

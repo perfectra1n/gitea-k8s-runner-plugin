@@ -1,0 +1,8 @@
+# A failing step must fail the job and report its exit code.
+name: failing
+on: [push]
+jobs:
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "about to fail"; exit 7
