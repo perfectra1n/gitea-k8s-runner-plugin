@@ -1,0 +1,19 @@
+apiVersion: v2
+name: gitea-runner-k8s
+description: A Gitea Actions runner that runs every workflow job as its own Kubernetes pod, via the gitea-k8s-runner-plugin backend plugin.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.31.0-0"
+home: https://github.com/perfectra1n/gitea-k8s-runner-plugin
+sources:
+  - https://github.com/perfectra1n/gitea-k8s-runner-plugin
+keywords:
+  - gitea
+  - actions
+  - runner
+  - ci
+dependencies:
+  - name: common
+    repository: oci://ghcr.io/bjw-s-labs/helm
+    version: 5.2.1

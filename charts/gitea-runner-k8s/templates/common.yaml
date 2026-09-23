@@ -1,0 +1,6 @@
+{{- /* Chart values → bjw-s values; the user's own bjw-s keys win. */ -}}
+{{- $computed := include "gitea-runner-k8s.values" . | fromYaml -}}
+{{- if hasKey $computed "Error" }}{{ fail (printf "internal: generated values do not parse: %s" $computed.Error) }}{{ end -}}
+{{- $_ := set . "Values" (mustMergeOverwrite $computed (deepCopy .Values)) -}}
+{{- include "bjw-s.common.loader.init" . -}}
+{{- include "bjw-s.common.loader.generate" . -}}

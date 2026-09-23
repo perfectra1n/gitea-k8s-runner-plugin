@@ -180,7 +180,27 @@ run = "docker build --target basic --build-arg VERSION=${IMAGE_TAG:-dev} -t ${IM
 description = "Build both images"
 depends = ["image-plugin", "image-runner"]
 
+[tasks.helm-lint]
+description = "Build chart deps, helm lint, and assert the rendered chart's wiring (tests/assert.sh)"
+run = [
+  "helm dependency build charts/gitea-runner-k8s",
+  "helm lint --strict charts/gitea-runner-k8s -f charts/gitea-runner-k8s/tests/values-test.yaml",
+  "sh charts/gitea-runner-k8s/tests/assert.sh",
+]
+
+[tasks.helm-docs]
+description = "Regenerate the chart README from values.yaml comments"
+run = "helm-docs --chart-search-root charts"
+
+[tasks.helm-docs-check]
+description = "Fail if the chart README is stale (CI gate)"
+run = """
+set -eu
+helm-docs --chart-search-root charts
+git diff --exit-code -- charts/gitea-runner-k8s/README.md || { echo "chart README is stale: run 'mise run helm-docs'" >&2; exit 1; }
+"""
+
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
-depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test", "runner:test", "runner:lint", "runner:gen-check"]
+depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test", "runner:test", "runner:lint", "runner:gen-check", "helm-lint", "helm-docs-check"]
 run = "echo '✓ local CI gate passed'"

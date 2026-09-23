@@ -1,0 +1,23 @@
+gitea:
+  url: https://gitea.example.com
+  token: secret-token
+jobNamespace: ci-jobs
+classes:
+  - name: small
+    aliases: [ubuntu-latest]
+    podspec:
+      schedulerName: capacity-scheduler
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+  - name: dind
+    podspec:
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+          env: [{name: DOCKER_HOST, value: tcp://localhost:2375}]
+      initContainers:
+        - name: dind
+          image: docker:dind
+          restartPolicy: Always
+          securityContext: {privileged: true}

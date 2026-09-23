@@ -1,0 +1,90 @@
+# Values for gitea-runner-k8s. The chart is a thin layer over the bjw-s common
+# library: the keys below are turned into bjw-s values (controllers,
+# persistence, configMaps, ...), and any bjw-s key you set yourself is merged on
+# top, so everything the library supports can still be customised.
+
+gitea:
+  # -- (string) URL of the Gitea instance, e.g. https://gitea.example.com
+  url: ""
+  # -- Runner registration token. Ignored when `gitea.existingSecret` is set.
+  token: ""
+  # -- Existing Secret holding the registration token.
+  existingSecret: ""
+  # -- Key of the token in `gitea.existingSecret`.
+  existingSecretKey: token
+
+runner:
+  # -- Runner name shown in Gitea. Defaults to the release fullname.
+  name: ""
+  image:
+    # -- Patched gitea/runner image with backend plugin support.
+    repository: ghcr.io/perfectra1n/gitea-runner-k8s
+    # -- Defaults to the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # -- Jobs run concurrently. Pods sit Pending under the cluster scheduler, so
+  # this can be high.
+  capacity: 10
+  # -- Maximum job duration; also bounds each job pod (activeDeadlineSeconds).
+  timeout: 3h
+  # -- Log level of the runner.
+  logLevel: info
+  # -- Extra labels that do not use the plugin (e.g. "self-hosted:host").
+  extraLabels: []
+  # -- Extra runner config merged into the generated config.yaml.
+  config: {}
+  # -- Resources of the runner container.
+  resources: {}
+
+plugin:
+  image:
+    # -- The Kubernetes backend plugin image.
+    repository: ghcr.io/perfectra1n/gitea-k8s-runner-plugin
+    # -- Defaults to the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # -- Extra plugin options passed with every job (ready_timeout,
+  # image_pull_policy, service_resources, labels).
+  options: {}
+  # -- Resources of the plugin sidecar.
+  resources: {}
+
+# -- Namespace where job pods run. Defaults to the release namespace. The chart
+# creates the Role and RoleBinding there.
+jobNamespace: ""
+
+# -- Kubernetes cluster domain, used for the cache server address.
+clusterDomain: cluster.local
+
+cache:
+  # -- Run the runner's cache server (actions/cache) and expose it to job pods.
+  enabled: true
+  # -- Port of the cache server and its Service.
+  port: 8088
+
+# -- Runner state (.runner registration file, cache blobs).
+data:
+  # -- Existing PVC to use instead of creating one.
+  existingClaim: ""
+  size: 5Gi
+  accessMode: ReadWriteOnce
+  # -- (string) Storage class of the created PVC.
+  storageClass:
+
+# -- Job classes. Each class becomes a podspec ConfigMap mounted into the plugin
+# and runner labels `<name>:k8s:<path>` (plus one per alias), so `runs-on:
+# <name>` runs on that podspec. The podspec is a corev1.PodSpec; a container
+# named `main` runs the steps and needs /bin/sh, env and tar.
+# @default -- one `default` class on the act runner image
+classes:
+  - name: default
+    aliases:
+      - ubuntu-latest
+      - ubuntu-24.04
+    podspec:
+      containers:
+        - name: main
+          image: ghcr.io/catthehacker/ubuntu:act-24.04
+
+# -- bjw-s global settings (fullnameOverride, labels, ...).
+global: {}

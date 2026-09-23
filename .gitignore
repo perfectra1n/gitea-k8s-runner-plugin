@@ -3,3 +3,4 @@
 *.out
 /.superpowers/
 /.mise/config.local.toml
+/charts/*/charts/
