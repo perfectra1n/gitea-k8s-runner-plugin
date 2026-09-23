@@ -15,9 +15,9 @@ syntax = "proto3";
 
 package plugin.v1alpha;
 
-option go_package = "github.com/perfectra1n/gitea-k8s-runner-plugin/gen/plugin/v1alpha;pluginv1";
-
 import "google/protobuf/duration.proto";
+
+option go_package = "github.com/perfectra1n/gitea-k8s-runner-plugin/gen/plugin/v1alpha;pluginv1";
 
 // BackendPlugin owns execution environments (one per workflow job). Servers
 // also serve grpc.health.v1.

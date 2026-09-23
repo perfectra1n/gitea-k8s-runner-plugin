@@ -72,7 +72,7 @@ type BuildInput struct {
 // Load reads a podspec file (a corev1.PodSpec in YAML). Unknown fields are
 // rejected so typos surface at job start instead of silently doing nothing.
 func Load(path string) (*corev1.PodSpec, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the path is operator config (flag or runs-on label arg), by design
 	if err != nil {
 		return nil, fmt.Errorf("read podspec: %w", err)
 	}

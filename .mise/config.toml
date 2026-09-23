@@ -26,6 +26,7 @@ yq = "4.53.6"
 shellcheck = "0.11.0"
 actionlint = "1.7.12"
 lefthook = "2.1.14"
+shfmt = "3.14.1"
 
 [env]
 # Every build artifact, the patched upstream clone and the e2e kubeconfig live
@@ -35,12 +36,46 @@ GOFLAGS = "-trimpath"
 CGO_ENABLED = "0"
 
 [tasks.fmt]
-description = "Format Go sources in place (gofmt + goimports via golangci-lint)"
-run = "golangci-lint fmt ./gen/... ./plugin/..."
+description = "Format everything in place: Go (gofmt/goimports), proto (buf), shell (shfmt)"
+run = [
+  "golangci-lint fmt ./gen/... ./plugin/...",
+  "buf format -w",
+  "git ls-files -z --cached --others --exclude-standard '*.sh' | xargs -0 -r shfmt -w -i 2 -ci",
+]
 
 [tasks.fmt-check]
-description = "Fail if any Go source is unformatted (CI gate)"
-run = "golangci-lint fmt --diff ./gen/... ./plugin/..."
+description = "Fail if any Go, proto or shell source is unformatted (CI gate)"
+run = [
+  "golangci-lint fmt --diff ./gen/... ./plugin/...",
+  "buf format -d --exit-code",
+  "git ls-files -z --cached --others --exclude-standard '*.sh' | xargs -0 -r shfmt -d -i 2 -ci",
+]
+
+[tasks.vet]
+description = "go vet on every module (the compiler-adjacent correctness gate)"
+run = "go vet ./gen/... ./plugin/..."
+
+[tasks.tidy-check]
+description = "Fail if any go.mod/go.sum is not tidy (dependency ratchet)"
+run = """
+set -eu
+for m in gen plugin; do
+  (cd "$m" && go mod tidy -diff) || { echo "$m/go.mod is not tidy: run 'go mod tidy' in $m" >&2; exit 1; }
+done
+"""
+
+[tasks.proto-breaking]
+description = "Fail on wire-incompatible proto changes against origin/main (skipped until main carries the proto)"
+run = """
+set -eu
+ref=main
+git rev-parse --verify -q origin/main >/dev/null && ref=origin/main
+if git cat-file -e "$ref:proto/plugin/v1alpha/plugin.proto" 2>/dev/null; then
+  buf breaking --against ".git#ref=$ref"
+else
+  echo "no proto on $ref yet; nothing to compare"
+fi
+"""
 
 [tasks.lint]
 description = "golangci-lint (plugin + gen), shellcheck on scripts, actionlint on workflows"
@@ -79,5 +114,5 @@ run = "go build -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s
 
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
-depends = ["fmt-check", "gen-check", "lint", "test"]
+depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test"]
 run = "echo '✓ local CI gate passed'"
