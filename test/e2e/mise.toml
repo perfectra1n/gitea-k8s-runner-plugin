@@ -1,0 +1,2 @@
+# e2e harness tasks (kind + Gitea). Filled in by Task 9; invoke as
+# `mise run //test/e2e:test`.
