@@ -218,9 +218,12 @@ set -eu
 : "${IMAGE_TAG:?set IMAGE_TAG to the release version}"
 prefix=${IMAGE_PREFIX:-ghcr.io/perfectra1n}
 platforms=${PLATFORMS:-linux/amd64,linux/arm64}
-docker buildx build --platform "$platforms" --push -f plugin/Dockerfile \
+# GHCR links packages (and gives them the repo's visibility) by this label.
+src=https://github.com/perfectra1n/gitea-k8s-runner-plugin
+meta="--label org.opencontainers.image.source=$src --label org.opencontainers.image.version=$IMAGE_TAG --annotation index:org.opencontainers.image.source=$src"
+docker buildx build --platform "$platforms" --push $meta -f plugin/Dockerfile \
   -t "$prefix/gitea-k8s-runner-plugin:$IMAGE_TAG" .
-docker buildx build --platform "$platforms" --push --target basic --build-arg "VERSION=$IMAGE_TAG" \
+docker buildx build --platform "$platforms" --push $meta --target basic --build-arg "VERSION=$IMAGE_TAG" \
   -t "$prefix/gitea-runner-k8s:$IMAGE_TAG" .build/runner
 """
 
