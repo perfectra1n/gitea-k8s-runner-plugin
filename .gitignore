@@ -4,3 +4,4 @@
 /.superpowers/
 /.mise/config.local.toml
 /charts/*/charts/
+/docs/superpowers/
