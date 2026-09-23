@@ -1,0 +1,64 @@
+# mise tasks + tooling for gitea-k8s-runner-plugin. `mise tasks` lists them;
+# `mise run <task>`. Mise is the source of truth for every toolchain and task, in
+# developer shells and in CI (CI only ever calls `mise run <task>`).
+#
+# Monorepo task mode: the e2e harness tasks live next to the harness in
+# `test/e2e/mise.toml` and run as `mise run //test/e2e:test` (or any sub-task,
+# e.g. `//test/e2e:cluster-create`). Root tasks below stay invokable unprefixed.
+monorepo_root = true
+
+[settings]
+experimental = true
+
+[monorepo]
+config_roots = ["test/e2e"]
+
+[tools]
+# Upstream gitea/runner declares `go 1.27`, so this is the floor.
+go = "1.27.1"
+buf = "1.73.0"
+golangci-lint = "2.13.2"
+kind = "0.33.0"
+kubectl = "1.37.0"
+helm = "4.3.0"
+helm-docs = "1.14.2"
+yq = "4.53.6"
+shellcheck = "0.11.0"
+actionlint = "1.7.12"
+lefthook = "2.1.14"
+
+[env]
+# Every build artifact, the patched upstream clone and the e2e kubeconfig live
+# here (gitignored), so `git clean -fdX` is always a full reset.
+BUILD_DIR = "{{config_root}}/.build"
+GOFLAGS = "-trimpath"
+CGO_ENABLED = "0"
+
+[tasks.fmt]
+description = "Format Go sources in place (gofmt + goimports via golangci-lint)"
+run = "golangci-lint fmt ./gen/... ./plugin/..."
+
+[tasks.fmt-check]
+description = "Fail if any Go source is unformatted (CI gate)"
+run = "golangci-lint fmt --diff ./gen/... ./plugin/..."
+
+[tasks.lint]
+description = "golangci-lint (plugin + gen), shellcheck on scripts, actionlint on workflows"
+run = [
+  "golangci-lint run ./gen/... ./plugin/...",
+  "shellcheck runner/scripts/*.sh test/e2e/*.sh",
+  "actionlint .github/workflows/*.yaml",
+]
+
+[tasks.test]
+description = "Hermetic unit tests for the protocol and plugin modules (no cluster, no network)"
+run = "go test -race -count=1 ./gen/... ./plugin/..."
+
+[tasks.build]
+description = "Build the plugin binary into .build/bin"
+run = "go build -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-plugin"
+
+[tasks.ci]
+description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
+depends = ["fmt-check", "gen-check", "lint", "test", "runner:test", "helm-lint", "helm-docs-check"]
+run = "echo '✓ local CI gate passed'"
