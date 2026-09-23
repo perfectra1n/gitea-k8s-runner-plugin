@@ -2,3 +2,4 @@
 *.test
 *.out
 /.superpowers/
+/.mise/config.local.toml

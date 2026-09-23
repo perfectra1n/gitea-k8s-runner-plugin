@@ -116,7 +116,46 @@ run = "go build -ldflags='-s -w' -o $BUILD_DIR/bin/gitea-k8s-runner-plugin ./plu
 description = "Build the plugin image (IMAGE_PREFIX/IMAGE_TAG override the ghcr.io name and :dev tag)"
 run = "docker build -f plugin/Dockerfile -t ${IMAGE_PREFIX:-ghcr.io/perfectra1n}/gitea-k8s-runner-plugin:${IMAGE_TAG:-dev} ."
 
+[tasks."runner:apply"]
+description = "Clone gitea/runner at runner/UPSTREAM into .build/runner and apply runner/patches (FORCE=1 discards local work)"
+run = "sh runner/scripts/apply.sh"
+
+[tasks."runner:refresh"]
+description = "Regenerate runner/patches from the commits on top of UPSTREAM in .build/runner"
+run = "sh runner/scripts/refresh.sh"
+
+[tasks."runner:test"]
+description = "Apply the series to a fresh upstream clone, then vet + run upstream's own test suite (docker tests self-skip)"
+depends = ["runner:apply"]
+dir = "{{config_root}}/.build/runner"
+# The clone sits under this repo's go.work; it is its own module. A dead
+# DOCKER_HOST makes upstream's daemon-backed tests skip, keeping this hermetic.
+env = { GOWORK = "off", CGO_ENABLED = "1" }
+run = [
+  "go vet ./...",
+  # RUNNER_TEST_SKIP (a `go test -skip` regex) is for hosts where pristine
+  # upstream itself fails (e.g. NixOS: /bin/sh is bash). Set it in the
+  # gitignored .mise/config.local.toml, never here: CI runs everything.
+  "go test -race -timeout 20m -parallel 8 ${RUNNER_TEST_SKIP:+-skip \"$RUNNER_TEST_SKIP\"} ./...",
+]
+
+[tasks."runner:build"]
+description = "Apply the series and build the patched runner binary into .build/bin/gitea-runner"
+depends = ["runner:apply"]
+dir = "{{config_root}}/.build/runner"
+env = { GOWORK = "off" }
+run = "go build -ldflags='-s -w' -o ../bin/gitea-runner ."
+
+[tasks.image-runner]
+description = "Build the patched runner image from upstream's own Dockerfile (basic target) in the patched clone"
+depends = ["runner:apply"]
+run = "docker build --target basic --build-arg VERSION=${IMAGE_TAG:-dev} -t ${IMAGE_PREFIX:-ghcr.io/perfectra1n}/gitea-runner-k8s:${IMAGE_TAG:-dev} .build/runner"
+
+[tasks.images]
+description = "Build both images"
+depends = ["image-plugin", "image-runner"]
+
 [tasks.ci]
 description = "The full local hermetic gate: format, codegen drift, lint, unit tests, upstream suite with our patches, chart"
-depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test"]
+depends = ["fmt-check", "vet", "tidy-check", "gen-check", "proto-breaking", "lint", "test", "runner:test"]
 run = "echo '✓ local CI gate passed'"
