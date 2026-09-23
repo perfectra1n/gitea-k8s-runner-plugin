@@ -18,13 +18,35 @@ permissions:
 
 jobs:
   gate:
-    name: Gate (fmt, vet, lint, tests, upstream suite, chart)
+    # One job per gate family: failures name the gate, and they run in
+    # parallel. Locally, `mise run ci` runs all of them.
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Format
+            tasks: fmt-check
+          - name: Vet and tidy
+            tasks: "vet ::: tidy-check"
+          - name: Codegen drift and proto compatibility
+            tasks: "gen-check ::: proto-breaking ::: runner:gen-check"
+          - name: Lint
+            tasks: lint
+          - name: Unit tests
+            tasks: test
+          - name: Upstream runner suite with patches
+            tasks: "runner:test ::: runner:lint"
+          - name: Helm chart
+            tasks: "helm-lint ::: helm-docs-check"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # proto-breaking compares against main.
+          fetch-depth: 0
 
       - name: Setup Mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
@@ -32,8 +54,17 @@ jobs:
           experimental: true
           install_args: --locked
 
-      - name: Local CI gate
-        run: mise run ci
+      - name: Go caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('**/go.sum', 'runner/UPSTREAM', 'runner/patches/*.patch') }}
+          restore-keys: go-${{ runner.os }}-${{ matrix.name }}-
+
+      - name: mise run ${{ matrix.tasks }}
+        run: mise run ${{ matrix.tasks }}
 
   e2e:
     name: End-to-end (kind + Gitea, examples)
