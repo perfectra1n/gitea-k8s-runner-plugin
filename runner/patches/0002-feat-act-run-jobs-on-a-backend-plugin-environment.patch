@@ -9,8 +9,6 @@ and label argument go to the plugin, event.json and envs.txt are copied
 in, and RUNNER_* come from the layout the plugin reports. docker:// and
 Dockerfile actions fail with a clear error, as there is no daemon.
 
-Assisted-by: Claude Code:claude-opus-5-5
-
 diff --git a/act/runner/action.go b/act/runner/action.go
 index 874e137..3fd99e9 100644
 --- a/act/runner/action.go

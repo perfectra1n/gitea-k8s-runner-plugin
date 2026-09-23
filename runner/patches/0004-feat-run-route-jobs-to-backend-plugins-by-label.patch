@@ -7,8 +7,6 @@ Labels are parsed with the configured plugins, so a runner declares and
 registers "small" for "small:k8s:/podspecs/small.yaml" and picks the plugin
 for a job whose first matching runs-on entry is a plugin label.
 
-Assisted-by: Claude Code:claude-opus-5-5
-
 diff --git a/docs/backend-plugins.md b/docs/backend-plugins.md
 new file mode 100644
 index 0000000..c1ad25a

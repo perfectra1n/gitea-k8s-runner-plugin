@@ -9,8 +9,6 @@ options. Labels may use a configured plugin name as their schema,
 "<name>:<plugin>[:<arg>]"; an unconfigured middle segment still makes the
 label opaque. Plugin labels need no Docker daemon.
 
-Assisted-by: Claude Code:claude-opus-5-5
-
 diff --git a/internal/pkg/config/config.example.yaml b/internal/pkg/config/config.example.yaml
 index 5cdd237..7bca6af 100644
 --- a/internal/pkg/config/config.example.yaml

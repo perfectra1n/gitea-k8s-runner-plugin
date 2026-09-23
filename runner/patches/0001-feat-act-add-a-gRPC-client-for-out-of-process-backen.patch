@@ -9,8 +9,6 @@ a VM, ...) and the runner drives it over the plugin.v1alpha protocol,
 which is wire-compatible with Forgejo runner's backend plugins. The
 client uses connect's gRPC protocol over h2c, so no new module is needed.
 
-Assisted-by: Claude Code:claude-opus-5-5
-
 diff --git a/Makefile b/Makefile
 index 639e703..602d487 100644
 --- a/Makefile
