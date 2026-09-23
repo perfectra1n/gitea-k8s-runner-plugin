@@ -344,3 +344,18 @@ func TestExtraLabelsCannotOverrideOwnership(t *testing.T) {
 		t.Errorf("instance label overridden: %v", j.Labels)
 	}
 }
+
+// The runner lays the workspace out under SharedMount, so a podspec mounting
+// its own "shared" volume elsewhere in main is moved there, keeping the rest.
+func TestSharedMountAtOtherPathIsMoved(t *testing.T) {
+	spec := mustSpec(t, plain+"volumes: [{name: shared, emptyDir: {}}]\n")
+	spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: SharedVolume, MountPath: "/work", SubPath: "ws"}}
+	m := container(t, build(t, BuildInput{Spec: spec}).Spec.Template.Spec.Containers, MainContainer)
+	want := []corev1.VolumeMount{{Name: SharedVolume, MountPath: SharedMount, SubPath: "ws"}}
+	if !reflect.DeepEqual(m.VolumeMounts, want) {
+		t.Errorf("mounts = %+v, want %+v", m.VolumeMounts, want)
+	}
+	if spec.Containers[0].VolumeMounts[0].MountPath != "/work" {
+		t.Error("input podspec was mutated")
+	}
+}

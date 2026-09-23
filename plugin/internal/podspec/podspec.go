@@ -147,8 +147,10 @@ func setupMain(ps *corev1.PodSpec, in BuildInput) error {
 	m.Command = []string{"sh", "-c", SleepScript}
 	m.Args = nil
 	m.WorkingDir = SharedMount
-	for _, vm := range m.VolumeMounts {
-		if vm.Name == SharedVolume {
+	for i := range m.VolumeMounts {
+		if m.VolumeMounts[i].Name == SharedVolume {
+			// The runner's paths live under SharedMount; keep subPath and co.
+			m.VolumeMounts[i].MountPath = SharedMount
 			return nil
 		}
 	}

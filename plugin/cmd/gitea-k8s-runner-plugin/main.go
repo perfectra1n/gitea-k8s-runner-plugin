@@ -172,18 +172,20 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 	}
-	log.Info("shutting down: removing live environments")
+	log.Info("shutting down: letting in-flight calls finish, then removing live environments")
 	hs.Shutdown()
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
-	srv.Shutdown(sctx)
+	// Stop taking calls and let running ones (a step mid-exec) finish, for
+	// most of the budget; then remove whatever environments are left.
 	stopped := make(chan struct{})
 	go func() { gs.GracefulStop(); close(stopped) }()
 	select {
 	case <-stopped:
-	case <-sctx.Done():
-		gs.Stop()
+	case <-time.After(shutdownTimeout * 3 / 4):
 	}
+	srv.Shutdown(sctx)
+	gs.Stop()
 	return nil
 }
 

@@ -113,3 +113,39 @@ func TestKillCommandKillsRecordedPid(t *testing.T) {
 		t.Fatal("sleep should have been killed")
 	}
 }
+
+// Cancelling a step must also stop what it started in the background.
+func TestKillCommandKillsDescendants(t *testing.T) {
+	dir := t.TempDir()
+	pidfile := filepath.Join(dir, "x.pid")
+	childPid := filepath.Join(dir, "child.pid")
+	argv := Wrap([]string{"sh", "-c", `sleep 30 & echo $! > "$0"; wait`, childPid}, nil, "", pidfile)
+	c := exec.Command(argv[0], argv[1:]...)
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var child string
+	for range 200 {
+		if b, err := os.ReadFile(childPid); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			child = strings.TrimSpace(string(b))
+			break
+		}
+		exec.Command("sleep", "0.02").Run() //nolint:errcheck // best-effort pause
+	}
+	if child == "" {
+		t.Fatal("child never started")
+	}
+	k := Kill(pidfile, 0)
+	if out, err := exec.Command(k[0], k[1:]...).CombinedOutput(); err != nil {
+		t.Fatalf("kill: %v %s", err, out)
+	}
+	_ = c.Wait()
+	for range 100 {
+		if exec.Command("kill", "-0", child).Run() != nil {
+			return // gone
+		}
+		exec.Command("sleep", "0.02").Run() //nolint:errcheck // best-effort pause
+	}
+	_ = exec.Command("kill", "-KILL", child).Run()
+	t.Fatalf("background child %s survived the kill", child)
+}

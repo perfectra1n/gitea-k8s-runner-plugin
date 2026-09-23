@@ -165,7 +165,7 @@ Run the plugin next to it with a ServiceAccount allowed to manage Jobs and exec 
 gitea-k8s-runner-plugin --listen unix:///run/plugin/plugin.sock --namespace ci-jobs --instance my-runner
 ```
 
-`--instance` labels every Job the plugin creates. Keep it stable across restarts: at startup the plugin deletes Jobs with its instance label that a previous process left behind. On `SIGTERM` it deletes the Jobs of every live job.
+`--instance` labels every Job the plugin creates. Keep it stable across restarts: at startup the plugin deletes Jobs with its instance label that a previous process left behind, and a runner removing a job the restarted plugin never saw only deletes it if it carries that label. On `SIGTERM` the plugin stops taking calls, lets in-flight ones (a step mid-exec) finish for up to 45 seconds, then deletes the Jobs of every job still live.
 
 ## Failure behaviour
 

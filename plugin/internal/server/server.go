@@ -442,25 +442,43 @@ func (s *Server) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*plug
 		return &pluginv1.RemoveResponse{}, nil // never a Job of ours
 	}
 	// Unknown ids still get a delete: after a plugin restart the runner
-	// removes environments this process never saw.
-	if err := s.backend.Delete(ctx, id); err != nil {
+	// removes environments this process never saw. Only our own Jobs, though:
+	// another instance may share the namespace.
+	var err error
+	if e != nil {
+		err = s.backend.Delete(ctx, id)
+	} else {
+		err = s.backend.DeleteOwned(ctx, id, s.defaults.Instance)
+	}
+	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
 	return &pluginv1.RemoveResponse{}, nil
 }
 
-// Shutdown deletes every live environment (plugin SIGTERM).
+// Shutdown deletes every live environment (plugin SIGTERM). It waits for an
+// RPC in flight on an environment to finish first, until ctx expires; after
+// that environments are deleted regardless.
 func (s *Server) Shutdown(ctx context.Context) {
 	s.mu.Lock()
-	ids := make([]string, 0, len(s.envs))
-	for id := range s.envs {
-		ids = append(ids, id)
+	envs := make([]*environment, 0, len(s.envs))
+	for _, e := range s.envs {
+		envs = append(envs, e)
 	}
 	s.envs = map[string]*environment{}
 	s.mu.Unlock()
 	var wg sync.WaitGroup
-	for _, id := range ids {
-		wg.Go(func() { _ = s.backend.Delete(ctx, id) })
+	for _, e := range envs {
+		wg.Go(func() {
+			select {
+			case e.lock <- struct{}{}:
+				defer func() { <-e.lock }()
+			case <-ctx.Done():
+			}
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = s.backend.Delete(dctx, e.id)
+		})
 	}
 	wg.Wait()
 }

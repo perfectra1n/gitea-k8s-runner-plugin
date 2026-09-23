@@ -37,14 +37,24 @@ func Wrap(cmd []string, env map[string]string, workdir, pidfile string) []string
 	return append(argv, cmd...)
 }
 
-// Kill returns the argv that terminates the command recorded in pidfile:
-// SIGTERM, then SIGKILL after grace seconds.
+// Kill returns the argv that terminates the command recorded in pidfile and
+// everything it started: SIGTERM to the whole process tree, then SIGKILL to
+// whatever is left after grace seconds. The tree comes from
+// /proc/<pid>/task/*/children, so no ps/pkill is needed in the image.
 func Kill(pidfile string, grace int) []string {
 	const script = `p=$(cat "$1" 2>/dev/null) || exit 0
 [ -n "$p" ] || exit 0
-kill -TERM "$p" 2>/dev/null
-i=0; while [ $i -lt "$2" ] && kill -0 "$p" 2>/dev/null; do sleep 1; i=$((i+1)); done
-kill -KILL "$p" 2>/dev/null
+tree() { for c in $(cat /proc/"$1"/task/*/children 2>/dev/null); do tree "$c"; done; echo "$1"; }
+pids=$(tree "$p")
+kill -TERM $pids 2>/dev/null
+i=0
+while [ $i -lt "$2" ]; do
+  alive=
+  for q in $pids; do kill -0 "$q" 2>/dev/null && alive=1; done
+  [ -n "$alive" ] || break
+  sleep 1; i=$((i+1))
+done
+kill -KILL $pids 2>/dev/null
 rm -f "$1"
 exit 0`
 	return []string{"/bin/sh", "-c", script, "sh", pidfile, strconv.Itoa(grace)}

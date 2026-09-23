@@ -366,3 +366,26 @@ func TestExecTransportErrorNamesPodState(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// Deleting an environment this process never tracked must not touch Jobs of
+// another plugin instance sharing the namespace.
+func TestDeleteOwned(t *testing.T) {
+	mk := func(name, instance string) *batchv1.Job {
+		return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: podLabels(name, instance)}}
+	}
+	unmanaged := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "unmanaged", Namespace: ns}}
+	b, cs := newTestBackend(t, mk("mine", "r0"), mk("theirs", "r1"), unmanaged)
+	for _, id := range []string{"mine", "theirs", "unmanaged", "missing"} {
+		if err := b.DeleteOwned(context.Background(), id, "r0"); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	left, _ := cs.BatchV1().Jobs(ns).List(context.Background(), metav1.ListOptions{})
+	var names []string
+	for _, j := range left.Items {
+		names = append(names, j.Name)
+	}
+	if strings.Join(names, ",") != "theirs,unmanaged" {
+		t.Errorf("remaining = %v, want theirs,unmanaged", names)
+	}
+}

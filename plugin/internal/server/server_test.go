@@ -34,6 +34,7 @@ type fakeBackend struct {
 	created   []*batchv1.Job
 	deleted   []string
 	execs     [][]string
+	owned     []string
 	readyErr  error
 	readyWait chan struct{}
 	exec      func(ctx context.Context, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
@@ -76,6 +77,13 @@ func (f *fakeBackend) Delete(_ context.Context, envID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, envID)
+	return nil
+}
+
+func (f *fakeBackend) DeleteOwned(_ context.Context, envID, instance string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.owned = append(f.owned, envID+"@"+instance)
 	return nil
 }
 
@@ -634,13 +642,20 @@ func TestRemoveIdempotent(t *testing.T) {
 			t.Fatalf("remove #%d: %v", i+1, err)
 		}
 	}
-	// A Remove for an id this process never saw (plugin restarted) still
-	// deletes by name and succeeds.
+	if d := fb.deletedIDs(); len(d) != 1 || d[0] != id {
+		t.Errorf("deleted = %v, want [%s] once", d, id)
+	}
+	// A Remove for an id this process never saw (plugin restarted) deletes
+	// the Job only if this instance owns it.
 	if _, err := c.Remove(context.Background(), &pluginv1.RemoveRequest{EnvironmentId: "gk-from-before-restart"}); err != nil {
 		t.Fatal(err)
 	}
-	if d := fb.deletedIDs(); len(d) < 2 || d[len(d)-1] != "gk-from-before-restart" {
-		t.Errorf("deleted = %v", d)
+	fb.mu.Lock()
+	owned := append([]string(nil), fb.owned...)
+	fb.mu.Unlock()
+	// The repeated Remove of a forgotten id goes through the same owned path.
+	if len(owned) == 0 || owned[len(owned)-1] != "gk-from-before-restart@r0" {
+		t.Errorf("owned deletes = %v, want the unknown id checked against instance r0", owned)
 	}
 }
 
@@ -652,5 +667,74 @@ func TestShutdownRemovesLiveEnvironments(t *testing.T) {
 	d := strings.Join(fb.deletedIDs(), ",")
 	if !strings.Contains(d, id) || !strings.Contains(d, id2) {
 		t.Errorf("deleted = %s, want both %s and %s", d, id, id2)
+	}
+}
+
+// An Exec in flight at shutdown finishes before its Job is deleted.
+func TestShutdownWaitsForInFlightExec(t *testing.T) {
+	fb := &fakeBackend{}
+	c, srv, id := started(t, fb)
+	running, release := make(chan struct{}), make(chan struct{})
+	fb.mu.Lock()
+	fb.exec = func(_ context.Context, cmd []string, _ io.Reader, _, _ io.Writer) (int, error) {
+		if cmd[len(cmd)-1] == "long" {
+			close(running)
+			<-release
+		}
+		return 0, nil
+	}
+	fb.mu.Unlock()
+	execDone := make(chan execResult, 1)
+	go func() { execDone <- execRPC(t, c, &pluginv1.ExecRequest{EnvironmentId: id, Command: []string{"long"}}) }()
+	<-running
+	shutdownDone := make(chan struct{})
+	go func() { srv.Shutdown(context.Background()); close(shutdownDone) }()
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown returned while an exec was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if d := fb.deletedIDs(); len(d) != 0 {
+		t.Fatalf("job deleted under a running exec: %v", d)
+	}
+	close(release)
+	if r := <-execDone; r.complete == nil || r.complete.GetExitCode() != 0 {
+		t.Errorf("in-flight exec should complete normally: %+v", r)
+	}
+	<-shutdownDone
+	if d := fb.deletedIDs(); len(d) != 1 || d[0] != id {
+		t.Errorf("deleted = %v, want [%s]", d, id)
+	}
+}
+
+// Past its deadline, shutdown deletes environments even if an RPC is stuck.
+func TestShutdownDeletesAfterDeadline(t *testing.T) {
+	fb := &fakeBackend{}
+	c, srv, id := started(t, fb)
+	running := make(chan struct{})
+	fb.mu.Lock()
+	fb.exec = func(ctx context.Context, cmd []string, _ io.Reader, _, _ io.Writer) (int, error) {
+		if cmd[len(cmd)-1] == "stuck" {
+			close(running)
+			<-ctx.Done()
+			return -1, ctx.Err()
+		}
+		return 0, nil
+	}
+	fb.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		st, err := c.Exec(ctx, &pluginv1.ExecRequest{EnvironmentId: id, Command: []string{"stuck"}})
+		if err == nil {
+			_, _ = st.Recv()
+		}
+	}()
+	<-running
+	sctx, scancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer scancel()
+	srv.Shutdown(sctx)
+	if d := fb.deletedIDs(); len(d) != 1 || d[0] != id {
+		t.Errorf("deleted = %v, want [%s]", d, id)
 	}
 }

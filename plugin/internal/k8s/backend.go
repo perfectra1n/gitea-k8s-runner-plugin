@@ -38,6 +38,9 @@ type Backend interface {
 	// not an error; err means the command could not be run or its stream broke.
 	Exec(ctx context.Context, pod string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int, err error)
 	Delete(ctx context.Context, envID string) error
+	// DeleteOwned deletes the environment's Job only if it carries this
+	// plugin instance's labels (for ids the process did not create itself).
+	DeleteOwned(ctx context.Context, envID, instance string) error
 	// Sweep deletes every Job this plugin instance left behind.
 	Sweep(ctx context.Context, instance string) (int, error)
 }
@@ -123,6 +126,20 @@ func (b *KubeBackend) Delete(ctx context.Context, envID string) error {
 		return fmt.Errorf("delete job %s/%s: %w", b.ns, envID, err)
 	}
 	return nil
+}
+
+func (b *KubeBackend) DeleteOwned(ctx context.Context, envID, instance string) error {
+	job, err := b.cs.BatchV1().Jobs(b.ns).Get(ctx, envID, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("get job %s/%s: %w", b.ns, envID, err)
+	}
+	if job.Labels[podspec.LabelManagedBy] != podspec.ManagedByValue || job.Labels[podspec.LabelInstance] != instance {
+		return nil // another instance's (or nobody's) Job
+	}
+	return b.Delete(ctx, envID)
 }
 
 func (b *KubeBackend) Sweep(ctx context.Context, instance string) (int, error) {
