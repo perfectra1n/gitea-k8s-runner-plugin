@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: perfectra1n <jonfuller2012@gmail.com>
 Date: Wed, 23 Sep 2026 12:11:56 -0700
-Subject: [PATCH] feat(act): add a gRPC client for out-of-process backend
+Subject: [PATCH 1/4] feat(act): add a gRPC client for out-of-process backend
  plugins
 
 A backend plugin owns the job's execution environment (a Kubernetes pod,
@@ -635,16 +635,249 @@ index 0000000..5ccf636
 +func (e *Environment) IsEnvironmentCaseInsensitive() bool {
 +	return e.layout.GetEnvironmentCaseInsensitive()
 +}
-diff --git a/act/plugin/fake_plugin_test.go b/act/plugin/fake_plugin_test.go
+diff --git a/act/plugin/plugin_test.go b/act/plugin/plugin_test.go
 new file mode 100644
-index 0000000..75f7c1a
+index 0000000..6342d0c
 --- /dev/null
-+++ b/act/plugin/fake_plugin_test.go
-@@ -0,0 +1,202 @@
++++ b/act/plugin/plugin_test.go
+@@ -0,0 +1,226 @@
 +// Copyright 2026 The Gitea Authors. All rights reserved.
 +// SPDX-License-Identifier: MIT
 +
 +package plugin
++
++import (
++	"archive/tar"
++	"bytes"
++	"context"
++	"io"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"gitea.com/gitea/runner/act/container"
++	"gitea.com/gitea/runner/act/plugin/plugintest"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestEnv(t *testing.T, f *plugintest.Fake) (*Environment, *bytes.Buffer) {
++	t.Helper()
++	addr := plugintest.Serve(t, f)
++	ctx := context.Background()
++	c, err := Dial(ctx, "k8s", addr)
++	require.NoError(t, err)
++	assert.Equal(t, "fake", c.BackendName())
++	var out bytes.Buffer
++	env := c.NewEnvironment(&container.NewContainerInput{
++		Name:       "GITEA-ACTIONS-TASK-1_test",
++		Image:      "alpine:3",
++		WorkingDir: "/workspace/owner/repo",
++		Stdout:     &out,
++		Stderr:     &out,
++	}, []ServiceSpec{{Name: "postgres", Image: "postgres:17", Env: map[string]string{"A": "1"}, Ports: []string{"5432"}}},
++		map[string]string{"namespace": "ci"}, "/podspecs/small.yaml", 2*time.Hour)
++	require.NoError(t, env.Create(nil, nil)(ctx))
++	require.NoError(t, env.Start(false)(ctx))
++	return env, &out
++}
++
++func TestDialErrorNamesPlugin(t *testing.T) {
++	_, err := Dial(context.Background(), "k8s", "unix:///nonexistent/plugin.sock")
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "plugin k8s at unix:///nonexistent/plugin.sock")
++
++	_, err = Dial(context.Background(), "k8s", "ftp://x")
++	require.Error(t, err)
++}
++
++func TestCreateSendsJobAndMapsPaths(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, out := newTestEnv(t, f)
++
++	require.Len(t, f.Created(), 1)
++	req := f.Created()[0]
++	assert.Equal(t, "alpine:3", req.GetImage())
++	assert.Equal(t, "GITEA-ACTIONS-TASK-1_test", req.GetName())
++	assert.Equal(t, "/podspecs/small.yaml", req.GetLabelArg())
++	assert.Equal(t, map[string]string{"namespace": "ci"}, req.GetBackendOptions())
++	assert.Equal(t, 2*time.Hour, req.GetEnvironmentTimeout().AsDuration())
++	require.Len(t, req.GetServices(), 1)
++	assert.Equal(t, "postgres", req.GetServices()[0].GetName())
++	assert.Equal(t, []string{"5432"}, req.GetServices()[0].GetPorts())
++
++	assert.Contains(t, out.String(), "pod pending")
++	assert.Equal(t, "/__w/_act", env.GetActPath())
++	assert.Equal(t, "/__w/workspace/owner/repo", env.ToContainerPath("/workspace/owner/repo"))
++	assert.Equal(t, "/__w/_act/x", env.ToContainerPath("/__w/_act/x"), "paths already inside the environment are kept")
++	assert.Equal(t, "PATH", env.GetPathVariableName())
++	assert.Equal(t, "/a:/b", env.JoinPathVariable("/a", "/b"))
++	assert.NotEmpty(t, env.DefaultPathVariable())
++	assert.False(t, env.IsEnvironmentCaseInsensitive())
++	assert.Equal(t, map[string]any{"os": "Linux", "arch": "ARM64", "temp": "/__w/_temp", "tool_cache": "/__w/_tool"},
++		env.GetRunnerContext(context.Background()))
++}
++
++// Review Focus 4 (client side): a non-zero exit is act's exit-code error; a
++// plugin-reported failure is a plain error.
++func TestExecResults(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, out := newTestEnv(t, f)
++	ctx := context.Background()
++
++	require.NoError(t, env.Exec([]string{"echo", "hi"}, map[string]string{"K": "v"}, "", "sub")(ctx))
++	assert.Contains(t, out.String(), "hi\n")
++	assert.Contains(t, out.String(), "warn\n")
++	last := f.Execs()[len(f.Execs())-1]
++	assert.Equal(t, "env-1", last.GetEnvironmentId())
++	assert.Equal(t, map[string]string{"K": "v"}, last.GetEnv())
++	assert.Equal(t, "/__w/workspace/owner/repo/sub", last.GetWorkdir(), "relative workdir joins the job workdir")
++	assert.Nil(t, last.User, "empty user is left unset")
++
++	require.NoError(t, env.Exec([]string{"true"}, nil, "", "/abs")(ctx))
++	assert.Equal(t, "/abs", f.Execs()[len(f.Execs())-1].GetWorkdir())
++	require.NoError(t, env.Exec([]string{"true"}, nil, "", "")(ctx))
++	assert.Equal(t, "/__w/workspace/owner/repo", f.Execs()[len(f.Execs())-1].GetWorkdir())
++
++	err := env.Exec([]string{"exit2"}, nil, "", "")(ctx)
++	var code container.ExitCodeError
++	require.ErrorAs(t, err, &code)
++	assert.Equal(t, 2, int(code))
++
++	err = env.Exec([]string{"broken"}, nil, "", "")(ctx)
++	require.Error(t, err)
++	assert.NotErrorAs(t, err, &code, "ExecFailed is not an exit code")
++	assert.Contains(t, err.Error(), "pod evicted")
++
++	err = env.Exec([]string{"grpc-error"}, nil, "", "")(ctx)
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "plugin went away")
++}
++
++func TestReplaceLogWriter(t *testing.T) {
++	env, _ := newTestEnv(t, &plugintest.Fake{})
++	var mine bytes.Buffer
++	oldOut, oldErr := env.ReplaceLogWriter(&mine, &mine)
++	require.NoError(t, env.Exec([]string{"echo", "captured"}, nil, "", "")(context.Background()))
++	assert.Contains(t, mine.String(), "captured")
++	env.ReplaceLogWriter(oldOut, oldErr)
++}
++
++func TestCopyRoundTrip(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, _ := newTestEnv(t, f)
++	ctx := context.Background()
++
++	require.NoError(t, env.Copy("/__w/_act/", &container.FileEntry{Name: "workflow/event.json", Mode: 0o644, Body: `{"a":1}`})(ctx))
++	b, err := os.ReadFile(filepath.Join(f.Root, "__w/_act/workflow/event.json"))
++	require.NoError(t, err)
++	assert.JSONEq(t, `{"a":1}`, string(b))
++
++	rc, err := env.GetContainerArchive(ctx, "/__w/_act/workflow/event.json")
++	require.NoError(t, err)
++	defer rc.Close()
++	tr := tar.NewReader(rc)
++	h, err := tr.Next()
++	require.NoError(t, err)
++	assert.Equal(t, "event.json", h.Name)
++	body, err := io.ReadAll(tr)
++	require.NoError(t, err)
++	assert.JSONEq(t, `{"a":1}`, string(body))
++
++	_, err = env.GetContainerArchive(ctx, "/does/not/exist")
++	require.Error(t, err, "a missing path fails up front, not at the first read")
++}
++
++func TestCopyDirHonoursGitignore(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, _ := newTestEnv(t, f)
++	src := t.TempDir()
++	for name, body := range map[string]string{
++		".gitignore":      "ignored.txt\n",
++		"kept.txt":        "kept",
++		"ignored.txt":     "nope",
++		"sub/nested.txt":  "nested",
++		".git/HEAD":       "ref: refs/heads/main",
++		".git/config":     "",
++		"sub/.gitkeep.md": "x",
++	} {
++		p := filepath.Join(src, name)
++		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
++		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
++	}
++	require.NoError(t, env.CopyDir("/__w/workspace/owner/repo", src+string(filepath.Separator)+".", true, true)(context.Background()))
++	dst := filepath.Join(f.Root, "__w/workspace/owner/repo")
++	assert.FileExists(t, filepath.Join(dst, "kept.txt"))
++	assert.FileExists(t, filepath.Join(dst, "sub/nested.txt"))
++	assert.NoFileExists(t, filepath.Join(dst, "ignored.txt"))
++	assert.NoDirExists(t, filepath.Join(dst, ".git"), "skipGitDir drops .git")
++}
++
++func TestUpdateFromEnvParsesEnvFile(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, _ := newTestEnv(t, f)
++	ctx := context.Background()
++	require.NoError(t, env.Copy("/__w/_act/", &container.FileEntry{
++		Name: "envs.txt", Mode: 0o644,
++		Body: "SIMPLE=value\nMULTI<<EOF\nline1\nline2\nEOF\n",
++	})(ctx))
++	got := map[string]string{"KEEP": "1"}
++	require.NoError(t, env.UpdateFromEnv("/__w/_act/envs.txt", &got)(ctx))
++	assert.Equal(t, map[string]string{"KEEP": "1", "SIMPLE": "value", "MULTI": "line1\nline2"}, got)
++
++	// A missing env file is not an error, like on the docker backend.
++	require.NoError(t, env.UpdateFromEnv("/__w/_act/absent.txt", &got)(ctx))
++}
++
++func TestUpdateFromImageEnvMerges(t *testing.T) {
++	f := &plugintest.Fake{ImageEnv: map[string]string{"PATH": "/opt/bin:/usr/bin", "JAVA_HOME": "/opt/java", "LANG": "C"}}
++	env, _ := newTestEnv(t, f)
++	got := map[string]string{"PATH": "/job/bin", "LANG": "C.UTF-8"}
++	require.NoError(t, env.UpdateFromImageEnv(&got)(context.Background()))
++	assert.Equal(t, map[string]string{
++		"PATH":      "/job/bin:/opt/bin:/usr/bin",
++		"JAVA_HOME": "/opt/java",
++		"LANG":      "C.UTF-8",
++	}, got, "same merge as the docker backend: PATH appended, existing keys win")
++}
++
++func TestRemoveIdempotentAndNoOps(t *testing.T) {
++	f := &plugintest.Fake{}
++	env, _ := newTestEnv(t, f)
++	ctx := context.Background()
++	require.NoError(t, env.Pull(true)(ctx))
++	info, err := env.Inspect(ctx)
++	require.NoError(t, err)
++	assert.Equal(t, container.StateRunning, info.State)
++	require.NoError(t, env.DumpLogs(ctx))
++	require.NoError(t, env.Remove()(ctx))
++	require.NoError(t, env.Remove()(ctx))
++	require.NoError(t, env.Close()(ctx))
++	assert.Equal(t, []string{"env-1"}, f.Removed(), "the environment is removed once")
++}
++
++func TestRemoveBeforeCreateIsNoOp(t *testing.T) {
++	addr := plugintest.Serve(t, &plugintest.Fake{})
++	c, err := Dial(context.Background(), "k8s", addr)
++	require.NoError(t, err)
++	env := c.NewEnvironment(&container.NewContainerInput{}, nil, nil, "", 0)
++	require.NoError(t, env.Remove()(context.Background()))
++}
++
++var _ container.ExecutionsEnvironment = (*Environment)(nil)
+diff --git a/act/plugin/plugintest/fake.go b/act/plugin/plugintest/fake.go
+new file mode 100644
+index 0000000..c4f4cd0
+--- /dev/null
++++ b/act/plugin/plugintest/fake.go
+@@ -0,0 +1,232 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++// Package plugintest provides an in-process backend plugin for tests.
++package plugintest
 +
 +import (
 +	"archive/tar"
@@ -667,25 +900,28 @@ index 0000000..75f7c1a
 +	"github.com/stretchr/testify/require"
 +)
 +
-+// fakePlugin is an in-memory backend: environment files live under a temp
-+// dir (the environment's "/"), and commands are scripted by argv[0].
-+type fakePlugin struct {
++// Fake is an in-memory backend plugin: environment files live under Root
++// (the environment's "/"), and argv[0] scripts a few commands (echo, exit2,
++// broken, grpc-error); anything else succeeds unless ExecHook says otherwise.
++type Fake struct {
 +	pluginv1alphaconnect.UnimplementedBackendPluginHandler
 +
-+	root string
++	Root     string
++	ImageEnv map[string]string
++	// ExecHook, if set, runs before the scripted commands; handled=true ends the exec.
++	ExecHook func(req *pluginv1alpha.ExecRequest) (exitCode int32, handled bool)
 +
-+	mu       sync.Mutex
-+	created  []*pluginv1alpha.CreateRequest
-+	removed  []string
-+	execs    []*pluginv1alpha.ExecRequest
-+	imageEnv map[string]string
++	mu      sync.Mutex
++	created []*pluginv1alpha.CreateRequest
++	removed []string
++	execs   []*pluginv1alpha.ExecRequest
 +}
 +
-+func (f *fakePlugin) Capabilities(context.Context, *connect.Request[pluginv1alpha.CapabilitiesRequest]) (*connect.Response[pluginv1alpha.CapabilitiesResponse], error) {
++func (f *Fake) Capabilities(context.Context, *connect.Request[pluginv1alpha.CapabilitiesRequest]) (*connect.Response[pluginv1alpha.CapabilitiesResponse], error) {
 +	return connect.NewResponse(&pluginv1alpha.CapabilitiesResponse{Name: "fake"}), nil
 +}
 +
-+func (f *fakePlugin) Create(_ context.Context, req *connect.Request[pluginv1alpha.CreateRequest]) (*connect.Response[pluginv1alpha.CreateResponse], error) {
++func (f *Fake) Create(_ context.Context, req *connect.Request[pluginv1alpha.CreateRequest]) (*connect.Response[pluginv1alpha.CreateResponse], error) {
 +	f.mu.Lock()
 +	f.created = append(f.created, req.Msg)
 +	f.mu.Unlock()
@@ -701,17 +937,17 @@ index 0000000..75f7c1a
 +	}), nil
 +}
 +
-+func (f *fakePlugin) Start(_ context.Context, req *connect.Request[pluginv1alpha.StartRequest], st *connect.ServerStream[pluginv1alpha.StartOutput]) error {
++func (f *Fake) Start(_ context.Context, req *connect.Request[pluginv1alpha.StartRequest], st *connect.ServerStream[pluginv1alpha.StartOutput]) error {
 +	if req.Msg.GetEnvironmentId() != "env-1" {
 +		return connect.NewError(connect.CodeNotFound, errors.New("unknown environment"))
 +	}
 +	if err := st.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_Data{Data: &pluginv1alpha.DataChunk{Data: []byte("pod pending\n")}}}); err != nil {
 +		return err
 +	}
-+	return st.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{StartComplete: &pluginv1alpha.StartComplete{ImageEnv: f.imageEnv}}})
++	return st.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{StartComplete: &pluginv1alpha.StartComplete{ImageEnv: f.ImageEnv}}})
 +}
 +
-+func (f *fakePlugin) Exec(_ context.Context, req *connect.Request[pluginv1alpha.ExecRequest], st *connect.ServerStream[pluginv1alpha.ExecOutput]) error {
++func (f *Fake) Exec(_ context.Context, req *connect.Request[pluginv1alpha.ExecRequest], st *connect.ServerStream[pluginv1alpha.ExecOutput]) error {
 +	f.mu.Lock()
 +	f.execs = append(f.execs, req.Msg)
 +	f.mu.Unlock()
@@ -720,6 +956,11 @@ index 0000000..75f7c1a
 +	}
 +	done := func(code int32) error {
 +		return st.Send(&pluginv1alpha.ExecOutput{Output: &pluginv1alpha.ExecOutput_ExecComplete{ExecComplete: &pluginv1alpha.ExecComplete{ExitCode: code}}})
++	}
++	if f.ExecHook != nil {
++		if code, handled := f.ExecHook(req.Msg); handled {
++			return done(code)
++		}
 +	}
 +	switch req.Msg.GetCommand()[0] {
 +	case "echo":
@@ -740,7 +981,7 @@ index 0000000..75f7c1a
 +	return done(0)
 +}
 +
-+func (f *fakePlugin) CopyIn(_ context.Context, st *connect.ClientStream[pluginv1alpha.CopyInChunk]) (*connect.Response[pluginv1alpha.CopyInResponse], error) {
++func (f *Fake) CopyIn(_ context.Context, st *connect.ClientStream[pluginv1alpha.CopyInChunk]) (*connect.Response[pluginv1alpha.CopyInResponse], error) {
 +	var dest string
 +	var buf bytes.Buffer
 +	first := true
@@ -760,14 +1001,14 @@ index 0000000..75f7c1a
 +	if err := st.Err(); err != nil {
 +		return nil, err
 +	}
-+	if err := untar(&buf, filepath.Join(f.root, dest)); err != nil {
++	if err := untar(&buf, filepath.Join(f.Root, dest)); err != nil {
 +		return nil, connect.NewError(connect.CodeInternal, err)
 +	}
 +	return connect.NewResponse(&pluginv1alpha.CopyInResponse{}), nil
 +}
 +
-+func (f *fakePlugin) CopyOut(_ context.Context, req *connect.Request[pluginv1alpha.CopyOutRequest], st *connect.ServerStream[pluginv1alpha.CopyOutChunk]) error {
-+	src := filepath.Join(f.root, req.Msg.GetSrcPath())
++func (f *Fake) CopyOut(_ context.Context, req *connect.Request[pluginv1alpha.CopyOutRequest], st *connect.ServerStream[pluginv1alpha.CopyOutChunk]) error {
++	src := filepath.Join(f.Root, req.Msg.GetSrcPath())
 +	b, err := os.ReadFile(src)
 +	if err != nil {
 +		return connect.NewError(connect.CodeNotFound, err)
@@ -787,7 +1028,7 @@ index 0000000..75f7c1a
 +	return nil
 +}
 +
-+func (f *fakePlugin) Remove(_ context.Context, req *connect.Request[pluginv1alpha.RemoveRequest]) (*connect.Response[pluginv1alpha.RemoveResponse], error) {
++func (f *Fake) Remove(_ context.Context, req *connect.Request[pluginv1alpha.RemoveRequest]) (*connect.Response[pluginv1alpha.RemoveResponse], error) {
 +	f.mu.Lock()
 +	f.removed = append(f.removed, req.Msg.GetEnvironmentId())
 +	f.mu.Unlock()
@@ -825,11 +1066,32 @@ index 0000000..75f7c1a
 +	}
 +}
 +
-+// serveFake serves f over h2c on a unix socket and returns its address.
-+func serveFake(t *testing.T, f *fakePlugin) string {
++// Created returns the Create requests received so far.
++func (f *Fake) Created() []*pluginv1alpha.CreateRequest {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]*pluginv1alpha.CreateRequest(nil), f.created...)
++}
++
++// Execs returns the Exec requests received so far.
++func (f *Fake) Execs() []*pluginv1alpha.ExecRequest {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]*pluginv1alpha.ExecRequest(nil), f.execs...)
++}
++
++// Removed returns the environment ids removed so far.
++func (f *Fake) Removed() []string {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]string(nil), f.removed...)
++}
++
++// Serve serves f over h2c on a unix socket and returns its "unix://" address.
++func Serve(t testing.TB, f *Fake) string {
 +	t.Helper()
-+	if f.root == "" {
-+		f.root = t.TempDir()
++	if f.Root == "" {
++		f.Root = t.TempDir()
 +	}
 +	sock := filepath.Join(t.TempDir(), "plugin.sock")
 +	lis, err := net.Listen("unix", sock)
@@ -843,237 +1105,6 @@ index 0000000..75f7c1a
 +	t.Cleanup(func() { _ = srv.Close() })
 +	return "unix://" + sock
 +}
-diff --git a/act/plugin/plugin_test.go b/act/plugin/plugin_test.go
-new file mode 100644
-index 0000000..707743a
---- /dev/null
-+++ b/act/plugin/plugin_test.go
-@@ -0,0 +1,225 @@
-+// Copyright 2026 The Gitea Authors. All rights reserved.
-+// SPDX-License-Identifier: MIT
-+
-+package plugin
-+
-+import (
-+	"archive/tar"
-+	"bytes"
-+	"context"
-+	"io"
-+	"os"
-+	"path/filepath"
-+	"testing"
-+	"time"
-+
-+	"gitea.com/gitea/runner/act/container"
-+
-+	"github.com/stretchr/testify/assert"
-+	"github.com/stretchr/testify/require"
-+)
-+
-+func newTestEnv(t *testing.T, f *fakePlugin) (*Environment, *bytes.Buffer) {
-+	t.Helper()
-+	addr := serveFake(t, f)
-+	ctx := context.Background()
-+	c, err := Dial(ctx, "k8s", addr)
-+	require.NoError(t, err)
-+	assert.Equal(t, "fake", c.BackendName())
-+	var out bytes.Buffer
-+	env := c.NewEnvironment(&container.NewContainerInput{
-+		Name:       "GITEA-ACTIONS-TASK-1_test",
-+		Image:      "alpine:3",
-+		WorkingDir: "/workspace/owner/repo",
-+		Stdout:     &out,
-+		Stderr:     &out,
-+	}, []ServiceSpec{{Name: "postgres", Image: "postgres:17", Env: map[string]string{"A": "1"}, Ports: []string{"5432"}}},
-+		map[string]string{"namespace": "ci"}, "/podspecs/small.yaml", 2*time.Hour)
-+	require.NoError(t, env.Create(nil, nil)(ctx))
-+	require.NoError(t, env.Start(false)(ctx))
-+	return env, &out
-+}
-+
-+func TestDialErrorNamesPlugin(t *testing.T) {
-+	_, err := Dial(context.Background(), "k8s", "unix:///nonexistent/plugin.sock")
-+	require.Error(t, err)
-+	assert.Contains(t, err.Error(), "plugin k8s at unix:///nonexistent/plugin.sock")
-+
-+	_, err = Dial(context.Background(), "k8s", "ftp://x")
-+	require.Error(t, err)
-+}
-+
-+func TestCreateSendsJobAndMapsPaths(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, out := newTestEnv(t, f)
-+
-+	require.Len(t, f.created, 1)
-+	req := f.created[0]
-+	assert.Equal(t, "alpine:3", req.GetImage())
-+	assert.Equal(t, "GITEA-ACTIONS-TASK-1_test", req.GetName())
-+	assert.Equal(t, "/podspecs/small.yaml", req.GetLabelArg())
-+	assert.Equal(t, map[string]string{"namespace": "ci"}, req.GetBackendOptions())
-+	assert.Equal(t, 2*time.Hour, req.GetEnvironmentTimeout().AsDuration())
-+	require.Len(t, req.GetServices(), 1)
-+	assert.Equal(t, "postgres", req.GetServices()[0].GetName())
-+	assert.Equal(t, []string{"5432"}, req.GetServices()[0].GetPorts())
-+
-+	assert.Contains(t, out.String(), "pod pending")
-+	assert.Equal(t, "/__w/_act", env.GetActPath())
-+	assert.Equal(t, "/__w/workspace/owner/repo", env.ToContainerPath("/workspace/owner/repo"))
-+	assert.Equal(t, "/__w/_act/x", env.ToContainerPath("/__w/_act/x"), "paths already inside the environment are kept")
-+	assert.Equal(t, "PATH", env.GetPathVariableName())
-+	assert.Equal(t, "/a:/b", env.JoinPathVariable("/a", "/b"))
-+	assert.NotEmpty(t, env.DefaultPathVariable())
-+	assert.False(t, env.IsEnvironmentCaseInsensitive())
-+	assert.Equal(t, map[string]any{"os": "Linux", "arch": "ARM64", "temp": "/__w/_temp", "tool_cache": "/__w/_tool"},
-+		env.GetRunnerContext(context.Background()))
-+}
-+
-+// Review Focus 4 (client side): a non-zero exit is act's exit-code error; a
-+// plugin-reported failure is a plain error.
-+func TestExecResults(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, out := newTestEnv(t, f)
-+	ctx := context.Background()
-+
-+	require.NoError(t, env.Exec([]string{"echo", "hi"}, map[string]string{"K": "v"}, "", "sub")(ctx))
-+	assert.Contains(t, out.String(), "hi\n")
-+	assert.Contains(t, out.String(), "warn\n")
-+	last := f.execs[len(f.execs)-1]
-+	assert.Equal(t, "env-1", last.GetEnvironmentId())
-+	assert.Equal(t, map[string]string{"K": "v"}, last.GetEnv())
-+	assert.Equal(t, "/__w/workspace/owner/repo/sub", last.GetWorkdir(), "relative workdir joins the job workdir")
-+	assert.Nil(t, last.User, "empty user is left unset")
-+
-+	require.NoError(t, env.Exec([]string{"true"}, nil, "", "/abs")(ctx))
-+	assert.Equal(t, "/abs", f.execs[len(f.execs)-1].GetWorkdir())
-+	require.NoError(t, env.Exec([]string{"true"}, nil, "", "")(ctx))
-+	assert.Equal(t, "/__w/workspace/owner/repo", f.execs[len(f.execs)-1].GetWorkdir())
-+
-+	err := env.Exec([]string{"exit2"}, nil, "", "")(ctx)
-+	var code container.ExitCodeError
-+	require.ErrorAs(t, err, &code)
-+	assert.Equal(t, 2, int(code))
-+
-+	err = env.Exec([]string{"broken"}, nil, "", "")(ctx)
-+	require.Error(t, err)
-+	assert.NotErrorAs(t, err, &code, "ExecFailed is not an exit code")
-+	assert.Contains(t, err.Error(), "pod evicted")
-+
-+	err = env.Exec([]string{"grpc-error"}, nil, "", "")(ctx)
-+	require.Error(t, err)
-+	assert.Contains(t, err.Error(), "plugin went away")
-+}
-+
-+func TestReplaceLogWriter(t *testing.T) {
-+	env, _ := newTestEnv(t, &fakePlugin{})
-+	var mine bytes.Buffer
-+	oldOut, oldErr := env.ReplaceLogWriter(&mine, &mine)
-+	require.NoError(t, env.Exec([]string{"echo", "captured"}, nil, "", "")(context.Background()))
-+	assert.Contains(t, mine.String(), "captured")
-+	env.ReplaceLogWriter(oldOut, oldErr)
-+}
-+
-+func TestCopyRoundTrip(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, _ := newTestEnv(t, f)
-+	ctx := context.Background()
-+
-+	require.NoError(t, env.Copy("/__w/_act/", &container.FileEntry{Name: "workflow/event.json", Mode: 0o644, Body: `{"a":1}`})(ctx))
-+	b, err := os.ReadFile(filepath.Join(f.root, "__w/_act/workflow/event.json"))
-+	require.NoError(t, err)
-+	assert.JSONEq(t, `{"a":1}`, string(b))
-+
-+	rc, err := env.GetContainerArchive(ctx, "/__w/_act/workflow/event.json")
-+	require.NoError(t, err)
-+	defer rc.Close()
-+	tr := tar.NewReader(rc)
-+	h, err := tr.Next()
-+	require.NoError(t, err)
-+	assert.Equal(t, "event.json", h.Name)
-+	body, err := io.ReadAll(tr)
-+	require.NoError(t, err)
-+	assert.JSONEq(t, `{"a":1}`, string(body))
-+
-+	_, err = env.GetContainerArchive(ctx, "/does/not/exist")
-+	require.Error(t, err, "a missing path fails up front, not at the first read")
-+}
-+
-+func TestCopyDirHonoursGitignore(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, _ := newTestEnv(t, f)
-+	src := t.TempDir()
-+	for name, body := range map[string]string{
-+		".gitignore":      "ignored.txt\n",
-+		"kept.txt":        "kept",
-+		"ignored.txt":     "nope",
-+		"sub/nested.txt":  "nested",
-+		".git/HEAD":       "ref: refs/heads/main",
-+		".git/config":     "",
-+		"sub/.gitkeep.md": "x",
-+	} {
-+		p := filepath.Join(src, name)
-+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
-+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
-+	}
-+	require.NoError(t, env.CopyDir("/__w/workspace/owner/repo", src+string(filepath.Separator)+".", true, true)(context.Background()))
-+	dst := filepath.Join(f.root, "__w/workspace/owner/repo")
-+	assert.FileExists(t, filepath.Join(dst, "kept.txt"))
-+	assert.FileExists(t, filepath.Join(dst, "sub/nested.txt"))
-+	assert.NoFileExists(t, filepath.Join(dst, "ignored.txt"))
-+	assert.NoDirExists(t, filepath.Join(dst, ".git"), "skipGitDir drops .git")
-+}
-+
-+func TestUpdateFromEnvParsesEnvFile(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, _ := newTestEnv(t, f)
-+	ctx := context.Background()
-+	require.NoError(t, env.Copy("/__w/_act/", &container.FileEntry{
-+		Name: "envs.txt", Mode: 0o644,
-+		Body: "SIMPLE=value\nMULTI<<EOF\nline1\nline2\nEOF\n",
-+	})(ctx))
-+	got := map[string]string{"KEEP": "1"}
-+	require.NoError(t, env.UpdateFromEnv("/__w/_act/envs.txt", &got)(ctx))
-+	assert.Equal(t, map[string]string{"KEEP": "1", "SIMPLE": "value", "MULTI": "line1\nline2"}, got)
-+
-+	// A missing env file is not an error, like on the docker backend.
-+	require.NoError(t, env.UpdateFromEnv("/__w/_act/absent.txt", &got)(ctx))
-+}
-+
-+func TestUpdateFromImageEnvMerges(t *testing.T) {
-+	f := &fakePlugin{imageEnv: map[string]string{"PATH": "/opt/bin:/usr/bin", "JAVA_HOME": "/opt/java", "LANG": "C"}}
-+	env, _ := newTestEnv(t, f)
-+	got := map[string]string{"PATH": "/job/bin", "LANG": "C.UTF-8"}
-+	require.NoError(t, env.UpdateFromImageEnv(&got)(context.Background()))
-+	assert.Equal(t, map[string]string{
-+		"PATH":      "/job/bin:/opt/bin:/usr/bin",
-+		"JAVA_HOME": "/opt/java",
-+		"LANG":      "C.UTF-8",
-+	}, got, "same merge as the docker backend: PATH appended, existing keys win")
-+}
-+
-+func TestRemoveIdempotentAndNoOps(t *testing.T) {
-+	f := &fakePlugin{}
-+	env, _ := newTestEnv(t, f)
-+	ctx := context.Background()
-+	require.NoError(t, env.Pull(true)(ctx))
-+	info, err := env.Inspect(ctx)
-+	require.NoError(t, err)
-+	assert.Equal(t, container.StateRunning, info.State)
-+	require.NoError(t, env.DumpLogs(ctx))
-+	require.NoError(t, env.Remove()(ctx))
-+	require.NoError(t, env.Remove()(ctx))
-+	require.NoError(t, env.Close()(ctx))
-+	assert.Equal(t, []string{"env-1"}, f.removed, "the environment is removed once")
-+}
-+
-+func TestRemoveBeforeCreateIsNoOp(t *testing.T) {
-+	addr := serveFake(t, &fakePlugin{})
-+	c, err := Dial(context.Background(), "k8s", addr)
-+	require.NoError(t, err)
-+	env := c.NewEnvironment(&container.NewContainerInput{}, nil, nil, "", 0)
-+	require.NoError(t, env.Remove()(context.Background()))
-+}
-+
-+var _ container.ExecutionsEnvironment = (*Environment)(nil)
 diff --git a/act/plugin/proto/v1alpha/plugin.pb.go b/act/plugin/proto/v1alpha/plugin.pb.go
 new file mode 100644
 index 0000000..38c290d

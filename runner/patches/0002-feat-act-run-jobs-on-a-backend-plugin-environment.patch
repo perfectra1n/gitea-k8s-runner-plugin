@@ -1,0 +1,430 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: perfectra1n <jonfuller2012@gmail.com>
+Date: Wed, 23 Sep 2026 12:16:40 -0700
+Subject: [PATCH 2/4] feat(act): run jobs on a backend plugin environment
+
+A job whose runs-on is picked by Config.BackendPicker starts on the
+configured plugin instead of the host or Docker: the job image, services
+and label argument go to the plugin, event.json and envs.txt are copied
+in, and RUNNER_* come from the layout the plugin reports. docker:// and
+Dockerfile actions fail with a clear error, as there is no daemon.
+
+Assisted-by: Claude Code:claude-opus-5-5
+
+diff --git a/act/runner/action.go b/act/runner/action.go
+index 874e137..3fd99e9 100644
+--- a/act/runner/action.go
++++ b/act/runner/action.go
+@@ -290,6 +290,9 @@ func dockerActionImageTag(repository, actionName string, localAction bool) strin
+ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool, stage stepStage) error {
+ 	logger := common.Logger(ctx)
+ 	rc := step.getRunContext()
++	if err := rc.refuseDockerOnPlugin(); err != nil {
++		return err
++	}
+ 	action := step.getActionModel()
+ 
+ 	var prepImage common.Executor
+diff --git a/act/runner/plugin_environment.go b/act/runner/plugin_environment.go
+new file mode 100644
+index 0000000..955d5f4
+--- /dev/null
++++ b/act/runner/plugin_environment.go
+@@ -0,0 +1,145 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package runner
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"maps"
++	"slices"
++	"strings"
++
++	"gitea.com/gitea/runner/act/common"
++	"gitea.com/gitea/runner/act/container"
++	"gitea.com/gitea/runner/act/plugin"
++)
++
++// IsPluginEnv reports whether the job runs on a backend plugin.
++func (rc *RunContext) IsPluginEnv() bool {
++	return rc.pluginName != ""
++}
++
++// refuseDockerOnPlugin fails docker-backed steps (docker:// and Dockerfile actions), which
++// need a Docker daemon the plugin environment does not have.
++func (rc *RunContext) refuseDockerOnPlugin() error {
++	if !rc.IsPluginEnv() {
++		return nil
++	}
++	return fmt.Errorf("docker actions are not supported on the %s backend plugin", rc.pluginName)
++}
++
++// resolveBackend picks the backend plugin for the job's runs-on, if any.
++func (rc *RunContext) resolveBackend(ctx context.Context) {
++	if rc.Config.BackendPicker == nil || rc.Run.Job().RunsOn() == nil {
++		return
++	}
++	if name, arg, ok := rc.Config.BackendPicker(rc.runsOnPlatformNames(ctx)); ok {
++		rc.pluginName, rc.pluginArg = name, arg
++	}
++}
++
++func (rc *RunContext) startPluginEnvironment() common.Executor {
++	return func(ctx context.Context) error {
++		logger := common.Logger(ctx)
++		cfg, ok := rc.Config.Plugins[rc.pluginName]
++		if !ok {
++			return fmt.Errorf("no backend plugin %q is configured", rc.pluginName)
++		}
++		username, password, err := rc.handleCredentials(ctx)
++		if err != nil {
++			return fmt.Errorf("failed to handle credentials: %w", err)
++		}
++		if username != "" || password != "" {
++			logger.Warnf("container.credentials are ignored on the %s backend plugin, give the plugin its own image pull credentials", rc.pluginName)
++		}
++		services, err := rc.pluginServices(ctx)
++		if err != nil {
++			return err
++		}
++		client, err := plugin.Dial(ctx, rc.pluginName, cfg.Address)
++		if err != nil {
++			return err
++		}
++
++		logWriter := rc.commandLogWriter(ctx)
++		env := client.NewEnvironment(&container.NewContainerInput{
++			Image:      rc.platformImage,
++			Name:       rc.jobContainerName(),
++			WorkingDir: rc.Config.Workdir,
++			Stdout:     logWriter,
++			Stderr:     logWriter,
++		}, services, cfg.Options, rc.pluginArg, rc.Config.ContainerMaxLifetime)
++		rc.JobContainer = env
++		rc.cleanUpJobContainer = func(ctx context.Context) error {
++			return errors.Join(env.Remove()(ctx), env.Close()(ctx))
++		}
++
++		if _, ok := rc.Env["LANG"]; !ok {
++			rc.Env["LANG"] = "C.UTF-8" // what the docker backend gives job containers
++		}
++		defer printStartJobContainerGroup(ctx, rc.platformImage, rc.jobContainerName(), "backend plugin "+rc.pluginName)()
++		return common.NewPipelineExecutor(
++			env.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
++			env.Start(false),
++			func(ctx context.Context) error {
++				for k, v := range rc.getRunnerContext(ctx) {
++					if v, ok := v.(string); ok {
++						rc.Env["RUNNER_"+strings.ToUpper(k)] = v
++					}
++				}
++				// The act path is only known once the plugin created the environment.
++				return env.Copy(env.GetActPath()+"/", &container.FileEntry{
++					Name: "workflow/event.json",
++					Mode: 0o644,
++					Body: rc.EventJSON,
++				}, &container.FileEntry{
++					Name: "workflow/envs.txt",
++					Mode: 0o666,
++					Body: "",
++				})(ctx)
++			},
++		)(ctx)
++	}
++}
++
++// pluginServices interpolates the job's services for the plugin. Options the plugin
++// protocol cannot carry are dropped with a warning.
++func (rc *RunContext) pluginServices(ctx context.Context) ([]plugin.ServiceSpec, error) {
++	logger := common.Logger(ctx)
++	services := rc.Run.Job().Services
++	if err := decodeDeferred(ctx, rc.ExprEval, "job services", rc.Run.Job().RawServices, &services); err != nil {
++		return nil, err
++	}
++	specs := make([]plugin.ServiceSpec, 0, len(services))
++	for _, id := range slices.Sorted(maps.Keys(services)) {
++		spec := services[id]
++		image, err := rc.ExprEval.Interpolate(ctx, spec.Image)
++		if err != nil {
++			return nil, fmt.Errorf("unable to interpolate service %s image: %w", id, err)
++		}
++		if image == "" {
++			logger.Infof("The service '%s' will not be started because the container definition has an empty image.", id)
++			continue
++		}
++		env := make(map[string]string, len(spec.Env)+len(rc.Config.ProxyEnv))
++		maps.Copy(env, rc.Config.ProxyEnv)
++		for k, v := range spec.Env {
++			if env[k], err = rc.ExprEval.Interpolate(ctx, v); err != nil {
++				return nil, fmt.Errorf("unable to interpolate service %s env %s: %w", id, k, err)
++			}
++		}
++		ports := make([]string, len(spec.Ports))
++		for i, p := range spec.Ports {
++			if ports[i], err = rc.ExprEval.Interpolate(ctx, p); err != nil {
++				return nil, fmt.Errorf("unable to interpolate service %s ports: %w", id, err)
++			}
++		}
++		if len(spec.Credentials) > 0 || len(spec.Volumes) > 0 || len(spec.Cmd) > 0 || spec.Options != "" {
++			logger.Warnf("service %s: credentials, volumes, command and options are ignored on the %s backend plugin", id, rc.pluginName)
++		}
++		specs = append(specs, plugin.ServiceSpec{Name: id, Image: image, Env: env, Ports: ports})
++	}
++	return specs, nil
++}
+diff --git a/act/runner/plugin_environment_test.go b/act/runner/plugin_environment_test.go
+new file mode 100644
+index 0000000..50dfff7
+--- /dev/null
++++ b/act/runner/plugin_environment_test.go
+@@ -0,0 +1,106 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package runner
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"slices"
++	"testing"
++	"time"
++
++	"gitea.com/gitea/runner/act/plugin/plugintest"
++
++	"gitea.dev/actionslib/pkg/model"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func runPluginWorkflow(t *testing.T, f *plugintest.Fake, workflow string, pick func([]string) (string, string, bool)) error {
++	t.Helper()
++	addr := plugintest.Serve(t, f)
++	wd, err := filepath.Abs(workdir)
++	require.NoError(t, err)
++	r, err := New(&Config{
++		Workdir:              wd,
++		EventName:            "push",
++		ContainerNamePrefix:  "GITEA-ACTIONS-TASK-7",
++		ContainerMaxLifetime: time.Hour,
++		GitHubInstance:       "github.com",
++		PlatformPicker:       func([]string) string { return "" },
++		Plugins:              map[string]PluginConfig{"fake": {Address: addr, Options: map[string]string{"namespace": "ci"}}},
++		BackendPicker:        pick,
++	})
++	require.NoError(t, err)
++	planner, err := model.NewWorkflowPlanner(filepath.Join(wd, workflow), true)
++	require.NoError(t, err)
++	plan, err := planner.PlanEvent("push")
++	require.NoError(t, err)
++	return r.NewPlanExecutor(plan)(context.Background())
++}
++
++func pickFake(runsOn []string) (string, string, bool) {
++	if slices.Contains(runsOn, "k8s-small") {
++		return "fake", "/podspecs/small.yaml", true
++	}
++	return "", "", false
++}
++
++func TestPluginEnvironment(t *testing.T) {
++	f := &plugintest.Fake{}
++	require.NoError(t, runPluginWorkflow(t, f, "plugin-env", pickFake))
++
++	created := f.Created()
++	require.Len(t, created, 1)
++	req := created[0]
++	assert.Equal(t, "alpine:latest", req.GetImage(), "container: image is interpolated and sent")
++	assert.Equal(t, "/podspecs/small.yaml", req.GetLabelArg())
++	assert.Equal(t, map[string]string{"namespace": "ci"}, req.GetBackendOptions())
++	assert.Equal(t, time.Hour, req.GetEnvironmentTimeout().AsDuration())
++	require.Len(t, req.GetServices(), 1, "a service whose image evaluates empty is skipped")
++	svc := req.GetServices()[0]
++	assert.Equal(t, "postgres", svc.GetName())
++	assert.Equal(t, "postgres:17", svc.GetImage())
++	assert.Equal(t, "pw", svc.GetEnv()["POSTGRES_PASSWORD"])
++	assert.Equal(t, []string{"5432"}, svc.GetPorts())
++
++	event, err := os.ReadFile(filepath.Join(f.Root, "__w/_act/workflow/event.json"))
++	require.NoError(t, err, "event.json is copied into the act path")
++	assert.NotEmpty(t, event)
++	assert.FileExists(t, filepath.Join(f.Root, "__w/_act/workflow/envs.txt"))
++
++	var sawStep bool
++	for _, e := range f.Execs() {
++		if e.GetEnv()["RUNNER_TEMP"] == "/__w/_temp" && e.GetEnv()["RUNNER_OS"] == "Linux" {
++			sawStep = true
++			assert.NotContains(t, e.GetEnv(), "JOB_CONTAINER_NAME", "docker-only variable")
++		}
++	}
++	assert.True(t, sawStep, "steps run through the plugin with RUNNER_* from the plugin layout: %v", f.Execs())
++	assert.Equal(t, []string{"env-1"}, f.Removed(), "the environment is removed at job end")
++}
++
++func TestPluginEnvironmentRefusesDockerSteps(t *testing.T) {
++	f := &plugintest.Fake{}
++	err := runPluginWorkflow(t, f, "plugin-docker-step", pickFake)
++	require.Error(t, err)
++	assert.Equal(t, []string{"env-1"}, f.Removed(), "the environment is still removed")
++}
++
++func TestPluginEnvironmentUnknownPlugin(t *testing.T) {
++	f := &plugintest.Fake{}
++	err := runPluginWorkflow(t, f, "plugin-env", func([]string) (string, string, bool) { return "missing", "", true })
++	require.ErrorContains(t, err, `no backend plugin "missing" is configured`)
++	assert.Empty(t, f.Created())
++}
++
++func TestIsPluginEnv(t *testing.T) {
++	rc := &RunContext{}
++	assert.False(t, rc.IsPluginEnv())
++	rc.pluginName = "k8s"
++	assert.True(t, rc.IsPluginEnv())
++	assert.False(t, rc.IsHostEnv(), "a plugin environment is not a host environment")
++	assert.EqualError(t, rc.refuseDockerOnPlugin(), "docker actions are not supported on the k8s backend plugin")
++}
+diff --git a/act/runner/run_context.go b/act/runner/run_context.go
+index b5a4f70..97c8399 100644
+--- a/act/runner/run_context.go
++++ b/act/runner/run_context.go
+@@ -75,6 +75,8 @@ type RunContext struct {
+ 	workflowCallSecrets map[string]string // the caller's secrets:, resolved once by resolveWorkflowCall
+ 	jobRunDefaults      model.RunDefaults // defaults.run, resolved once at job setup as GitHub does
+ 	platformImage       string            // container.image or the runs-on pick, resolved once by isEnabled
++	pluginName          string            // the backend plugin running this job, if any
++	pluginArg           string            // the argument of the plugin's runs-on label
+ 	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
+ 	// have already been created on the JobContainer. The runner sets up file-command files
+ 	// via JobContainer.Copy at the start of every phase, which truncates them — fine for
+@@ -1077,9 +1079,12 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
+ func (rc *RunContext) startContainer() common.Executor {
+ 	return func(ctx context.Context) error {
+ 		var err error
+-		if rc.IsHostEnv() {
++		switch {
++		case rc.IsPluginEnv():
++			err = rc.startPluginEnvironment()(ctx)
++		case rc.IsHostEnv():
+ 			err = rc.startHostEnvironment()(ctx)
+-		} else {
++		default:
+ 			err = rc.startJobContainer()(ctx)
+ 		}
+ 		if err != nil {
+@@ -1240,8 +1245,9 @@ func (rc *RunContext) runsOnPlatformNames(ctx context.Context) []string {
+ 
+ // resolvePlatformImage evaluates the job's image once, so every consumer sees the image the job started with.
+ func (rc *RunContext) resolvePlatformImage(ctx context.Context) error {
++	rc.resolveBackend(ctx)
+ 	image, err := rc.containerImage(ctx)
+-	if err == nil && image == "" {
++	if err == nil && image == "" && !rc.IsPluginEnv() {
+ 		image, err = rc.runsOnImage(ctx)
+ 	}
+ 	rc.platformImage = image
+@@ -1290,7 +1296,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
+ 	if err := rc.resolvePlatformImage(ctx); err != nil {
+ 		return false, err
+ 	}
+-	if rc.platformImage == "" {
++	if rc.platformImage == "" && !rc.IsPluginEnv() {
+ 		for _, platformName := range rc.runsOnPlatformNames(ctx) {
+ 			l.Infof("Skipping unsupported platform -- Try running with `-P %+v=...`", platformName)
+ 		}
+diff --git a/act/runner/runner.go b/act/runner/runner.go
+index aaec6a9..8bba255 100644
+--- a/act/runner/runner.go
++++ b/act/runner/runner.go
+@@ -73,16 +73,26 @@ type Config struct {
+ 	// AppURL. It is never set for github.com or a GithubMirror, so the token stays on-instance.
+ 	DefaultActionInstanceIsSelfHosted bool
+ 	PlatformPicker                    func(labels []string) string
+-	JobLoggerLevel                    *log.Level    // the level of job logger
+-	ValidVolumes                      []string      // only volumes (and bind mounts) in this slice can be mounted on the job container or service containers
+-	SharedToolCache                   bool          // one tool cache for all jobs instead of one per job
+-	InsecureSkipTLS                   bool          // whether to skip verifying TLS certificate of the Gitea instance
+-	MaxParallel                       int           // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
+-	AllocatePTY                       bool          // allocate a pseudo-TTY for each step's process
+-	ServiceReadyTimeout               time.Duration // how long a job waits for its service containers to report healthy (0 uses the default)
+-	RunnerName                        string        // name this runner registered with, reported as `runner.name`, defaults to the hostname
+-	JobStartedHook                    string        // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
+-	JobCompletedHook                  string        // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
++	// BackendPicker picks the backend plugin and its label argument for a job's runs-on;
++	// ok=false runs the job on the host or docker as PlatformPicker decides.
++	BackendPicker       func(runsOn []string) (plugin, arg string, ok bool)
++	Plugins             map[string]PluginConfig // backend plugins by name
++	JobLoggerLevel      *log.Level              // the level of job logger
++	ValidVolumes        []string                // only volumes (and bind mounts) in this slice can be mounted on the job container or service containers
++	SharedToolCache     bool                    // one tool cache for all jobs instead of one per job
++	InsecureSkipTLS     bool                    // whether to skip verifying TLS certificate of the Gitea instance
++	MaxParallel         int                     // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
++	AllocatePTY         bool                    // allocate a pseudo-TTY for each step's process
++	ServiceReadyTimeout time.Duration           // how long a job waits for its service containers to report healthy (0 uses the default)
++	RunnerName          string                  // name this runner registered with, reported as `runner.name`, defaults to the hostname
++	JobStartedHook      string                  // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
++	JobCompletedHook    string                  // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
++}
++
++// PluginConfig is how to reach one backend plugin.
++type PluginConfig struct {
++	Address string            // unix:///path or tcp://host:port
++	Options map[string]string // passed to the plugin verbatim with every environment
+ }
+ 
+ // RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and
+diff --git a/act/runner/step_docker.go b/act/runner/step_docker.go
+index 1923a6a..93c9633 100644
+--- a/act/runner/step_docker.go
++++ b/act/runner/step_docker.go
+@@ -57,6 +57,9 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
+ 	step := sd.Step
+ 
+ 	return func(ctx context.Context) error {
++		if err := rc.refuseDockerOnPlugin(); err != nil {
++			return err
++		}
+ 		image := strings.TrimPrefix(step.Uses, "docker://")
+ 		eval := rc.NewExpressionEvaluator(ctx)
+ 		args, err := eval.Interpolate(ctx, step.With["args"])
+diff --git a/act/runner/testdata/plugin-docker-step/push.yml b/act/runner/testdata/plugin-docker-step/push.yml
+new file mode 100644
+index 0000000..efa36b7
+--- /dev/null
++++ b/act/runner/testdata/plugin-docker-step/push.yml
+@@ -0,0 +1,7 @@
++name: plugin-docker-step
++on: push
++jobs:
++  test:
++    runs-on: k8s-small
++    steps:
++      - uses: docker://alpine:3
+diff --git a/act/runner/testdata/plugin-env/push.yml b/act/runner/testdata/plugin-env/push.yml
+new file mode 100644
+index 0000000..47e1a2d
+--- /dev/null
++++ b/act/runner/testdata/plugin-env/push.yml
+@@ -0,0 +1,18 @@
++name: plugin-env
++on: push
++jobs:
++  test:
++    runs-on: k8s-small
++    container:
++      image: alpine:${{ 'latest' }}
++    services:
++      postgres:
++        image: postgres:${{ '17' }}
++        env:
++          POSTGRES_PASSWORD: ${{ 'pw' }}
++        ports:
++          - 5432
++      skipped:
++        image: ${{ '' }}
++    steps:
++      - run: echo hello

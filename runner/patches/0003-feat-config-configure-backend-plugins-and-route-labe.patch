@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: perfectra1n <jonfuller2012@gmail.com>
+Date: Wed, 23 Sep 2026 12:17:36 -0700
+Subject: [PATCH 3/4] feat(config): configure backend plugins and route labels
+ to them
+
+A top-level plugins map names each backend plugin and its address and
+options. Labels may use a configured plugin name as their schema,
+"<name>:<plugin>[:<arg>]"; an unconfigured middle segment still makes the
+label opaque. Plugin labels need no Docker daemon.
+
+Assisted-by: Claude Code:claude-opus-5-5
+
+diff --git a/internal/pkg/config/config.example.yaml b/internal/pkg/config/config.example.yaml
+index 5cdd237..7bca6af 100644
+--- a/internal/pkg/config/config.example.yaml
++++ b/internal/pkg/config/config.example.yaml
+@@ -300,3 +300,15 @@ metrics:
+   #addr: "127.0.0.1:9101"
+   # Consecutive polling failures may last this long before /readyz returns 503.
+   #readiness_grace: 30s
++
++# Out-of-process backend plugins, which run jobs in environments they own (a
++# Kubernetes pod, a VM, ...). A runner label "<name>:<plugin>[:<arg>]" routes
++# jobs to the plugin, passing <arg> along. The protocol is plugin.v1alpha,
++# compatible with Forgejo runner's backend plugins.
++#plugins:
++#  k8s:
++#    # unix:///path or tcp://host:port, plain gRPC without TLS.
++#    address: unix:///run/plugin/plugin.sock
++#    # Passed to the plugin verbatim for every job.
++#    options:
++#      namespace: ci
+diff --git a/internal/pkg/config/config.go b/internal/pkg/config/config.go
+index c6aab9f..ccdcb15 100644
+--- a/internal/pkg/config/config.go
++++ b/internal/pkg/config/config.go
+@@ -205,6 +205,39 @@ type Config struct {
+ 	Host        Host        `yaml:"host"`         // Host represents the configuration for the host.
+ 	Metrics     Metrics     `yaml:"metrics"`      // Metrics represents the configuration for the Prometheus metrics endpoint.
+ 	HealthCheck HealthCheck `yaml:"health_check"` // HealthCheck controls opt-in local task-admission checks.
++	// Plugins are out-of-process backend plugins, by the name labels use as their schema.
++	Plugins map[string]Plugin `yaml:"plugins"`
++}
++
++// Plugin is how to reach one backend plugin.
++type Plugin struct {
++	Address string            `yaml:"address"` // unix:///path or tcp://host:port
++	Options map[string]string `yaml:"options"` // passed verbatim to the plugin for every job
++}
++
++// PluginNames returns the configured plugin names, the extra schemas labels may use.
++func (c *Config) PluginNames() map[string]bool {
++	names := make(map[string]bool, len(c.Plugins))
++	for name := range c.Plugins {
++		names[name] = true
++	}
++	return names
++}
++
++func validatePlugins(plugins map[string]Plugin) error {
++	for name, p := range plugins {
++		switch {
++		case name == "" || strings.Contains(name, ":"):
++			return fmt.Errorf("plugins.%s: a plugin name must be non-empty and contain no colon", name)
++		case name == "host" || name == "docker":
++			return fmt.Errorf("plugins.%s: %q is a built-in label schema", name, name)
++		case p.Address == "":
++			return fmt.Errorf("plugins.%s.address is required", name)
++		case !strings.HasPrefix(p.Address, "unix://") && !strings.HasPrefix(p.Address, "tcp://"):
++			return fmt.Errorf("plugins.%s.address %q must be unix:///path or tcp://host:port", name, p.Address)
++		}
++	}
++	return nil
+ }
+ 
+ // LoadDefault returns the default configuration.
+@@ -284,6 +317,9 @@ func LoadDefault(file string) (*Config, error) {
+ 	if cfg.Container.WorkdirParent == "" {
+ 		cfg.Container.WorkdirParent = "workspace"
+ 	}
++	if err := validatePlugins(cfg.Plugins); err != nil {
++		return nil, err
++	}
+ 	if cfg.Runner.DefaultImage == "" {
+ 		cfg.Runner.DefaultImage = DefaultImage
+ 	}
+diff --git a/internal/pkg/config/plugins_test.go b/internal/pkg/config/plugins_test.go
+new file mode 100644
+index 0000000..c2d007d
+--- /dev/null
++++ b/internal/pkg/config/plugins_test.go
+@@ -0,0 +1,56 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package config
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func loadYAML(t *testing.T, content string) (*Config, error) {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
++	return LoadDefault(path)
++}
++
++func TestLoadDefault_Plugins(t *testing.T) {
++	cfg, err := loadYAML(t, `
++plugins:
++  k8s:
++    address: unix:///run/plugin/plugin.sock
++    options:
++      namespace: ci
++      ready_timeout: 15m
++`)
++	require.NoError(t, err)
++	assert.Equal(t, map[string]Plugin{"k8s": {
++		Address: "unix:///run/plugin/plugin.sock",
++		Options: map[string]string{"namespace": "ci", "ready_timeout": "15m"},
++	}}, cfg.Plugins)
++	assert.Equal(t, map[string]bool{"k8s": true}, cfg.PluginNames())
++
++	cfg, err = LoadDefault("")
++	require.NoError(t, err)
++	assert.Empty(t, cfg.PluginNames())
++}
++
++func TestLoadDefault_PluginErrors(t *testing.T) {
++	for name, content := range map[string]string{
++		"no address":        "plugins:\n  k8s:\n    options: {a: b}\n",
++		"built-in name":     "plugins:\n  docker:\n    address: unix:///x.sock\n",
++		"name with a colon": "plugins:\n  \"a:b\":\n    address: unix:///x.sock\n",
++		"bad scheme":        "plugins:\n  k8s:\n    address: http://x\n",
++	} {
++		t.Run(name, func(t *testing.T) {
++			_, err := loadYAML(t, content)
++			require.Error(t, err)
++			assert.Contains(t, err.Error(), "plugins.")
++		})
++	}
++}
+diff --git a/internal/pkg/labels/labels.go b/internal/pkg/labels/labels.go
+index 66e3f8e..7493118 100644
+--- a/internal/pkg/labels/labels.go
++++ b/internal/pkg/labels/labels.go
+@@ -18,14 +18,21 @@ const (
+ 
+ type Label struct {
+ 	Name   string
+-	Schema string
++	Schema string // host, docker or the name of a backend plugin
+ 	Arg    string
+ 	// Opaque marks a label whose name contains a colon but no supported schema,
+ 	// like "pool:e57e18d4-...". It is kept verbatim and behaves like a host label.
+ 	Opaque bool
+ }
+ 
++// Parse parses a label with the built-in schemas only.
+ func Parse(str string) (*Label, error) {
++	return ParseWith(str, nil)
++}
++
++// ParseWith parses a label, also accepting "<name>:<plugin>[:<arg>]" for each
++// configured backend plugin.
++func ParseWith(str string, plugins map[string]bool) (*Label, error) {
+ 	if str == "" {
+ 		return nil, errors.New("empty label")
+ 	}
+@@ -42,7 +49,7 @@ func Parse(str string) (*Label, error) {
+ 	if len(splits) >= 3 {
+ 		label.Arg = splits[2]
+ 	}
+-	if label.Schema != SchemeHost && label.Schema != SchemeDocker {
++	if label.Schema != SchemeHost && label.Schema != SchemeDocker && !plugins[label.Schema] {
+ 		// Not a schema we know: the colon belongs to the label name itself.
+ 		return &Label{
+ 			Name:   str,
+@@ -74,8 +81,7 @@ func (l Labels) PickPlatform(runsOn []string) string {
+ 			platforms[label.Name] = strings.TrimPrefix(label.Arg, "//")
+ 		case SchemeHost:
+ 			platforms[label.Name] = SelfHostedPlatform
+-		default:
+-			// unreachable: Parse only produces host or docker schemas
++		default: // backend plugins, see PickBackend
+ 			continue
+ 		}
+ 	}
+@@ -87,6 +93,28 @@ func (l Labels) PickPlatform(runsOn []string) string {
+ 	return ""
+ }
+ 
++// IsPlugin reports whether the label routes jobs to a backend plugin.
++func (l *Label) IsPlugin() bool {
++	return l.Schema != SchemeHost && l.Schema != SchemeDocker
++}
++
++// PickBackend returns the plugin and its argument when the first runs-on entry this
++// runner has a label for is a plugin label; the same precedence as PickPlatform.
++func (l Labels) PickBackend(runsOn []string) (plugin, arg string, ok bool) {
++	for _, v := range runsOn {
++		for _, label := range l {
++			if label.Name != v {
++				continue
++			}
++			if label.IsPlugin() {
++				return label.Schema, label.Arg, true
++			}
++			return "", "", false
++		}
++	}
++	return "", "", false
++}
++
+ func (l Labels) Names() []string {
+ 	names := make([]string, 0, len(l))
+ 	for _, label := range l {
+diff --git a/internal/pkg/labels/plugin_labels_test.go b/internal/pkg/labels/plugin_labels_test.go
+new file mode 100644
+index 0000000..96aa126
+--- /dev/null
++++ b/internal/pkg/labels/plugin_labels_test.go
+@@ -0,0 +1,85 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package labels
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestParseWithPlugins(t *testing.T) {
++	plugins := map[string]bool{"k8s": true}
++
++	l, err := ParseWith("small:k8s:/podspecs/small/podspec.yaml", plugins)
++	require.NoError(t, err)
++	assert.Equal(t, &Label{Name: "small", Schema: "k8s", Arg: "/podspecs/small/podspec.yaml"}, l)
++
++	l, err = ParseWith("small:k8s", plugins)
++	require.NoError(t, err)
++	assert.Equal(t, &Label{Name: "small", Schema: "k8s"}, l)
++
++	// Built-in schemas are unaffected.
++	l, err = ParseWith("ubuntu:docker://node:18", plugins)
++	require.NoError(t, err)
++	assert.Equal(t, "docker", l.Schema)
++
++	// Without the plugin configured the label is opaque, as before.
++	l, err = Parse("small:k8s:/podspecs/small/podspec.yaml")
++	require.NoError(t, err)
++	assert.True(t, l.Opaque)
++	assert.Equal(t, SchemeHost, l.Schema)
++}
++
++// An unconfigured middle segment keeps the label opaque (e.g. a pool id).
++func TestParseWithUnconfiguredSchemaIsOpaque(t *testing.T) {
++	l, err := ParseWith("pool:e57e18d4-2f5c-4d67-9f7e-0f2b6c3f1a90", map[string]bool{"k8s": true})
++	require.NoError(t, err)
++	assert.Equal(t, &Label{Name: "pool:e57e18d4-2f5c-4d67-9f7e-0f2b6c3f1a90", Schema: SchemeHost, Opaque: true}, l)
++}
++
++func TestPluginLabelsRoundTripAndDocker(t *testing.T) {
++	plugins := map[string]bool{"k8s": true}
++	var ls Labels
++	for _, s := range []string{"small:k8s:/podspecs/small/podspec.yaml", "pool:abc"} {
++		l, err := ParseWith(s, plugins)
++		require.NoError(t, err)
++		ls = append(ls, l)
++	}
++	assert.Equal(t, []string{"small:k8s:/podspecs/small/podspec.yaml", "pool:abc"}, ls.ToStrings())
++	assert.Equal(t, []string{"small", "pool:abc"}, ls.Names())
++	assert.False(t, ls.RequireDocker(), "plugin labels need no docker daemon")
++	assert.Empty(t, ls.PickPlatform([]string{"small"}), "a plugin label is not a platform")
++}
++
++func TestPickBackend(t *testing.T) {
++	plugins := map[string]bool{"k8s": true, "vm": true}
++	var ls Labels
++	for _, s := range []string{"ubuntu:docker://node:18", "small:k8s:/a", "big:vm:/b", "bare:k8s"} {
++		l, err := ParseWith(s, plugins)
++		require.NoError(t, err)
++		ls = append(ls, l)
++	}
++	tests := []struct {
++		runsOn           []string
++		wantPlugin, want string
++		wantOK           bool
++	}{
++		{[]string{"big", "small"}, "vm", "/b", true},
++		{[]string{"small"}, "k8s", "/a", true},
++		{[]string{"bare"}, "k8s", "", true},
++		{[]string{"unknown", "small"}, "k8s", "/a", true},
++		// The first runs-on entry this runner has a label for decides, like PickPlatform.
++		{[]string{"ubuntu", "small"}, "", "", false},
++		{[]string{"unknown"}, "", "", false},
++		{nil, "", "", false},
++	}
++	for _, tt := range tests {
++		p, a, ok := ls.PickBackend(tt.runsOn)
++		assert.Equal(t, tt.wantOK, ok, "%v", tt.runsOn)
++		assert.Equal(t, tt.wantPlugin, p, "%v", tt.runsOn)
++		assert.Equal(t, tt.want, a, "%v", tt.runsOn)
++	}
++}
