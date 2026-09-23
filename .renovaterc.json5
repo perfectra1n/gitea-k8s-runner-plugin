@@ -1,0 +1,93 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["github>home-operations/renovate-config"],
+  // The hosted Mend app does not run arbitrary postUpgradeTasks, and this
+  // chart's README carries nothing a dependency bump changes.
+  ignorePresets: ["github>home-operations/renovate-config:helmPostUpgradeTasks.json5"],
+  // CI's tidy-check fails on an untidy go.mod.
+  postUpdateOptions: ["gomodTidy"],
+  // Generated from the commits in .build/runner by `mise run runner:refresh`,
+  // never edited directly.
+  ignorePaths: ["runner/patches/**"],
+  customManagers: [
+    {
+      customType: "regex",
+      description: "gitea/runner tag the patch series applies to",
+      managerFilePatterns: ["/^runner/UPSTREAM$/"],
+      matchStrings: ["^(?<currentValue>v\\d\\S*)"],
+      depNameTemplate: "gitea/runner",
+      datasourceTemplate: "gitea-tags",
+      registryUrlTemplate: "https://gitea.com",
+      versioningTemplate: "semver",
+    },
+    {
+      customType: "regex",
+      description: "Container images in the example workflows, example values and e2e manifests",
+      managerFilePatterns: ["/^examples/.+\\.ya?ml$/", "/^test/e2e/manifests/.+\\.ya?ml$/"],
+      matchStrings: ["image:\\s*[\"']?(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>[\\w][\\w.-]*)"],
+      datasourceTemplate: "docker",
+    },
+    {
+      customType: "regex",
+      description: "Images the e2e harness preloads into kind (the same images as above, so they land on the same branch)",
+      managerFilePatterns: ["/^test/e2e/mise\\.toml$/"],
+      // Only `name:tag` tokens whose tag starts with a digit, which excludes
+      // the harness's own `:e2e` images and `//test/e2e:<task>` references.
+      matchStrings: ["(?<depName>[a-z0-9][a-z0-9._/-]*[a-z0-9]):(?<currentValue>\\d[\\w.-]*)"],
+      datasourceTemplate: "docker",
+    },
+  ],
+  packageRules: [
+    {
+      description: "The gen module is this repository's own, required at v0.0.0 and replaced with ../gen",
+      matchManagers: ["gomod"],
+      matchPackageNames: ["github.com/perfectra1n/gitea-k8s-runner-plugin/**"],
+      enabled: false,
+    },
+    {
+      description: "Auto-merge non-major updates, but only after every CI check passes",
+      matchUpdateTypes: ["minor", "patch", "digest", "lockFileMaintenance"],
+      automerge: true,
+    },
+    {
+      description: "zer0ver: 0.x minors can break at any time, don't automerge them",
+      matchUpdateTypes: ["minor"],
+      matchCurrentVersion: "/^v?0\\./",
+      automerge: false,
+    },
+    {
+      description: "The Kubernetes client libraries release together",
+      matchManagers: ["gomod"],
+      matchPackageNames: ["k8s.io/api", "k8s.io/apimachinery", "k8s.io/client-go", "k8s.io/streaming"],
+      groupName: "kubernetes go modules",
+      groupSlug: "kubernetes-go",
+    },
+    {
+      description: "Protobuf/gRPC code generators stamp their version into gen/, which the hosted app cannot regenerate",
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "google.golang.org/protobuf",
+        "google.golang.org/grpc/cmd/protoc-gen-go-grpc",
+        "connectrpc.com/connect",
+      ],
+      automerge: false,
+      prBodyNotes: ["CI's `gen-check` fails until the generated code is refreshed: check out this branch, run `mise run gen`, and push the `gen/` changes."],
+    },
+    {
+      description: "A new gitea/runner release needs the patch series rebased onto it",
+      matchPackageNames: ["gitea/runner"],
+      automerge: false,
+      semanticCommitType: "feat",
+      semanticCommitScope: "runner",
+      commitMessageTopic: "upstream gitea/runner",
+      prBodyNotes: ["CI applies `runner/patches` to the new tag. If they no longer apply or the upstream suite fails: `mise run runner:apply`, rebase the commits in `.build/runner` onto the new tag, `mise run runner:refresh`, and push."],
+    },
+    {
+      description: "Images in examples and the e2e harness don't ship in a release",
+      matchManagers: ["custom.regex"],
+      matchDatasources: ["docker"],
+      semanticCommitType: "chore",
+      semanticCommitScope: "examples",
+    },
+  ],
+}
