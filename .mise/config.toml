@@ -80,7 +80,7 @@ fi
 [tasks.lint]
 description = "golangci-lint (plugin + gen), shellcheck on scripts, actionlint on workflows"
 run = [
-  "golangci-lint run ./gen/... ./plugin/...",
+  "golangci-lint run --allow-parallel-runners ./gen/... ./plugin/...",
   "git ls-files -z --cached --others --exclude-standard '*.sh' | xargs -0 -r shellcheck",
   "if [ -d .github/workflows ]; then actionlint; fi",
 ]
@@ -170,7 +170,7 @@ description = "Lint the patched upstream tree with upstream's own golangci confi
 depends = ["runner:apply"]
 dir = "{{config_root}}/.build/runner"
 env = { GOWORK = "off" }
-run = "golangci-lint run ./..."
+run = "golangci-lint run --allow-parallel-runners ./..."
 
 [tasks."runner:build"]
 description = "Apply the series and build the patched runner binary into .build/bin/gitea-runner"
