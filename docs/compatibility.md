@@ -16,7 +16,8 @@ The protocol in [`proto/plugin/v1alpha/plugin.proto`](../proto/plugin/v1alpha/pl
 - `CopyOut` streams a tar whose top-level entry is the base name of `src_path`, matching `docker cp`; a missing path is `NotFound`.
 - `Remove` is idempotent, including for environment ids the plugin process never saw: after a plugin restart it deletes the Job by name, but only if the Job carries this plugin instance's labels, so instances sharing a namespace never remove each other's jobs.
 - The plugin serves `grpc.health.v1` alongside `BackendPlugin`.
-- `StartComplete.image_env` carries the job container's environment. As on the docker backend, the runner uses it to extend `PATH`; steps inherit the rest from the container itself.
+- `StartComplete.image_env` carries the job container's environment. As on the docker backend, the runner uses it to extend `PATH`; steps inherit the rest from the container itself. `CreateResponse.default_path_variable` is therefore only a last resort, for images without `PATH`.
+- `CreateResponse` is answered before the pod exists, and the runner exports its `tool_cache_path` as `RUNNER_TOOL_CACHE` over the image's own value. So the plugin always reports `/__w/_tool` and, at `Start`, makes it a symlink to the image's tool cache (`RUNNER_TOOL_CACHE`, else `AGENT_TOOLSDIRECTORY`) when that is an absolute, writable directory.
 
 ## Cross-implementation smoke tests
 

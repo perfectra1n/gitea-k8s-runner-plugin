@@ -32,7 +32,12 @@ import (
 )
 
 // Filesystem layout reported to the runner. Everything lives on the shared
-// volume so a class can size it (emptyDir limit or an ephemeral PVC).
+// volume so a class can size it (emptyDir limit or an ephemeral PVC). The one
+// exception is the tool cache: when the job image names its own (see
+// prepareScript), toolCachePath becomes a symlink to it at Start.
+//
+// defaultPATH only matters when neither the job nor the image sets PATH: the
+// runner falls back to it after the image's PATH from StartComplete.image_env.
 const (
 	rootPath      = podspec.SharedMount
 	actPath       = rootPath + "/_act"
@@ -187,39 +192,86 @@ func (s *Server) boot(ctx context.Context, e *environment, progress func(string)
 	if err != nil {
 		return "", nil, statusFromCtx(rctx, err, codes.FailedPrecondition)
 	}
-	if err := s.prepare(rctx, pod); err != nil {
+	toolCache, err := s.prepare(rctx, pod)
+	if err != nil {
 		return "", nil, statusFromCtx(rctx, err, codes.FailedPrecondition)
+	}
+	if toolCache != toolCachePath {
+		progress(fmt.Sprintf("tool cache %s -> %s (from the job image)", toolCachePath, toolCache))
 	}
 	progress(fmt.Sprintf("pod %s is ready", pod))
 	return pod, s.imageEnv(rctx, pod), nil
 }
 
-// prepare creates the layout directories. It doubles as the exec probe: the
-// API server may accept exec a moment after the pod reports Ready.
-func (s *Server) prepare(ctx context.Context, pod string) error {
-	cmd := []string{"/bin/sh", "-c", `mkdir -p "$@"`, "sh", actPath, toolCachePath, tempPath}
+// prepareScript creates the layout directories and resolves the tool cache.
+// $1 is toolCachePath, the rest are directories to create.
+//
+// The runner derives RUNNER_TOOL_CACHE and runner.tool_cache from
+// CreateResponse, which is answered before the pod exists and overrides
+// whatever the image sets. So instead of reporting the image's tool cache,
+// toolCachePath is made a symlink to it: the image's RUNNER_TOOL_CACHE, else
+// AGENT_TOOLSDIRECTORY (both from main's env, i.e. image ENV plus podspec
+// env). Tools baked into the image are then found by actions/setup-* instead
+// of being downloaded every job. The symlink is only made when that directory
+// is absolute, writable by the step user (a cache miss must be able to add a
+// version) and toolCachePath is not already there (e.g. a mounted volume);
+// otherwise toolCachePath stays a plain directory on the shared volume. The
+// path in use is printed on stdout. Idempotent, as prepare may retry it.
+const prepareScript = `d=$1; shift
+mkdir -p "$@" || exit
+t=${RUNNER_TOOL_CACHE:-${AGENT_TOOLSDIRECTORY:-$d}}
+case $t in
+/?*)
+  if [ "$t" != "$d" ] && [ ! -e "$d" ] && [ ! -L "$d" ] &&
+    mkdir -p "$t" 2>/dev/null && [ -d "$t" ] && [ -w "$t" ] && ln -s "$t" "$d" 2>/dev/null; then
+    echo "$t"
+    exit 0
+  fi
+  ;;
+esac
+if [ -L "$d" ]; then
+  readlink "$d" || echo "$d"
+  exit 0
+fi
+mkdir -p "$d" && echo "$d"`
+
+// prepare creates the layout directories and returns the directory the tool
+// cache resolves to. It doubles as the exec probe: the API server may accept
+// exec a moment after the pod reports Ready.
+func (s *Server) prepare(ctx context.Context, pod string) (string, error) {
+	cmd := []string{"/bin/sh", "-c", prepareScript, "sh", toolCachePath, actPath, tempPath}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		var stderr bytes.Buffer
-		code, err := s.backend.Exec(ctx, pod, cmd, nil, io.Discard, &stderr)
+		var stdout, stderr bytes.Buffer
+		code, err := s.backend.Exec(ctx, pod, cmd, nil, &stdout, &stderr)
 		switch {
 		case err == nil && code == 0:
-			return nil
+			return resolvedToolCache(stdout.String()), nil
 		case err == nil:
-			return fmt.Errorf("creating %s in main failed (exit %d): %s", rootPath, code, strings.TrimSpace(stderr.String()))
+			return "", fmt.Errorf("creating %s in main failed (exit %d): %s", rootPath, code, strings.TrimSpace(stderr.String()))
 		case missingBinary(err):
-			return fmt.Errorf("main container needs /bin/sh (plus env and tar): %w", err)
+			return "", fmt.Errorf("main container needs /bin/sh (plus env and tar): %w", err)
 		}
 		lastErr = err
 		if attempt >= 10 {
-			return fmt.Errorf("exec into main does not work: %w", lastErr)
+			return "", fmt.Errorf("exec into main does not work: %w", lastErr)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("exec into main does not work: %w", lastErr)
+			return "", fmt.Errorf("exec into main does not work: %w", lastErr)
 		case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
 		}
 	}
+}
+
+// resolvedToolCache reads prepareScript's output: the last line, if it is an
+// absolute path, else toolCachePath.
+func resolvedToolCache(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if p := strings.TrimSpace(lines[len(lines)-1]); path.IsAbs(p) {
+		return p
+	}
+	return toolCachePath
 }
 
 func missingBinary(err error) bool {
