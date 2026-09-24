@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.1](https://github.com/perfectra1n/gitea-k8s-runner-plugin/compare/v0.1.0...v0.1.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **plugin:** point the tool cache at the job image's own ([9a140a9](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/9a140a9d22374b5be4b1beb5ee0b4d902ac57afd))
+* **plugin:** point the tool cache at the job image's own ([2d19ab8](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/2d19ab88176326d27fc95c63b522568f7e87f4a8))
+* **plugin:** tolerate native sidecar restarts while waiting for readiness ([2d41a82](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/2d41a820bbf01cc95ee02568cf822040993c0810))
+
+
+### Documentation
+
+* **chart:** keep the common chart's version out of the README ([f81a4b4](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/f81a4b4b990c4ff2145cdfba747a4b5c023c4f05))
+
+
+### Continuous Integration
+
+* configure Renovate ([74a89ae](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/74a89aee861ecb0453087f3c2048151ae048650c))
+
 ## 0.1.0 (2026-09-23)
 
 
