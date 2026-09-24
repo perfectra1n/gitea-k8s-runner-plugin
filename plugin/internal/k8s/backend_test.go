@@ -215,7 +215,9 @@ func TestWaitReadyToleratesTransientImagePull(t *testing.T) {
 func TestWaitReadyServiceCrashLoopIncludesNameAndLogs(t *testing.T) {
 	b, cs := newTestBackend(t)
 	st := readyStatus()
-	st.InitContainerStatuses = []corev1.ContainerStatus{waiting("svc-db", "CrashLoopBackOff", "back-off 10s")}
+	crash := waiting("svc-db", "CrashLoopBackOff", "back-off 10s")
+	crash.RestartCount = b.SidecarRestartLimit
+	st.InitContainerStatuses = []corev1.ContainerStatus{crash}
 	script(cs, withStatus(basePod(), st))
 	_, err := b.WaitReady(context.Background(), envID, func(string) {})
 	if err == nil {
@@ -225,6 +227,123 @@ func TestWaitReadyServiceCrashLoopIncludesNameAndLogs(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks %q", err, want)
 		}
+	}
+}
+
+func terminated(name string, code int32, reason string, restarts int32) corev1.ContainerStatus {
+	return corev1.ContainerStatus{Name: name, RestartCount: restarts, State: corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: code, Reason: reason},
+	}}
+}
+
+func restarted(cs corev1.ContainerStatus, n int32) corev1.ContainerStatus {
+	cs.RestartCount = n
+	return cs
+}
+
+// Kubelet restarts native sidecars by design, so a sidecar exit is only fatal
+// once it has used up SidecarRestartLimit restarts; main stays strict.
+func TestAssessSidecarRestarts(t *testing.T) {
+	const limit = 3
+	tests := []struct {
+		name      string
+		init      corev1.ContainerStatus
+		main      corev1.ContainerStatus
+		wantErr   []string
+		wantState string
+	}{
+		{
+			name:      "sidecar terminated once",
+			init:      terminated("svc-db", 0, "Completed", 0),
+			main:      running(podspec.MainContainer, true),
+			wantState: "svc-db: restarting (1/3)",
+		},
+		{
+			name:      "sidecar crash loop below limit",
+			init:      restarted(waiting("svc-db", "CrashLoopBackOff", "back-off 20s"), limit-1),
+			main:      running(podspec.MainContainer, true),
+			wantState: "svc-db: restarting (3/3)",
+		},
+		{
+			name:    "sidecar crash loop at limit",
+			init:    restarted(waiting("svc-db", "CrashLoopBackOff", "back-off 1m20s"), limit),
+			main:    running(podspec.MainContainer, true),
+			wantErr: []string{"container svc-db failed to start", "CrashLoopBackOff", "back-off 1m20s", "fake logs"},
+		},
+		{
+			name:    "sidecar terminated past limit",
+			init:    terminated("svc-db", 0, "Completed", limit+1),
+			main:    running(podspec.MainContainer, true),
+			wantErr: []string{"container svc-db exited during startup", "code 0", "Completed", "fake logs"},
+		},
+		{
+			name:    "main terminated is fatal immediately",
+			init:    running("svc-db", true),
+			main:    terminated(podspec.MainContainer, 1, "Error", 0),
+			wantErr: []string{"container main exited during startup", "code 1", "Error"},
+		},
+		{
+			name:    "main crash loop is fatal immediately",
+			init:    running("svc-db", true),
+			main:    waiting(podspec.MainContainer, "CrashLoopBackOff", "back-off 10s"),
+			wantErr: []string{"container main failed to start", "CrashLoopBackOff"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, _ := newTestBackend(t)
+			b.SidecarRestartLimit = limit
+			pod := withStatus(basePod(), corev1.PodStatus{
+				Phase:                 corev1.PodRunning,
+				InitContainerStatuses: []corev1.ContainerStatus{tt.init},
+				ContainerStatuses:     []corev1.ContainerStatus{tt.main},
+			})
+			ready, state, err := b.assess(context.Background(), pod, map[string]time.Time{})
+			if ready {
+				t.Fatal("assess reported ready")
+			}
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("want progress, got fatal error: %v", err)
+				}
+				if !strings.Contains(state, tt.wantState) {
+					t.Errorf("state %q lacks %q", state, tt.wantState)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want fatal error, got state %q", state)
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q lacks %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// A sidecar that recovers from a restart within the limit lets the job run.
+func TestWaitReadyRecoversFromSidecarRestart(t *testing.T) {
+	b, cs := newTestBackend(t)
+	p := basePod()
+	script(cs,
+		withStatus(p, corev1.PodStatus{Phase: corev1.PodRunning,
+			InitContainerStatuses: []corev1.ContainerStatus{terminated("svc-db", 0, "Completed", 0)},
+			ContainerStatuses:     []corev1.ContainerStatus{running(podspec.MainContainer, true)}}),
+		withStatus(p, corev1.PodStatus{Phase: corev1.PodRunning,
+			InitContainerStatuses: []corev1.ContainerStatus{restarted(waiting("svc-db", "CrashLoopBackOff", "back-off 10s"), 1)},
+			ContainerStatuses:     []corev1.ContainerStatus{running(podspec.MainContainer, true)}}),
+		withStatus(p, readyStatus()),
+	)
+	progress, lines := collect()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := b.WaitReady(ctx, envID, progress); err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(lines(), "\n"); !strings.Contains(all, "svc-db: restarting (2/3)") {
+		t.Errorf("progress %q lacks the restart", all)
 	}
 }
 

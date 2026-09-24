@@ -169,7 +169,7 @@ gitea-k8s-runner-plugin --listen unix:///run/plugin/plugin.sock --namespace ci-j
 
 ## Failure behaviour
 
-Every failure shows up in the job log rather than hanging: a pod that does not become ready within `ready_timeout` (with its last condition and events), an image pull failing for over a minute, a crash-looping service (with its last 50 log lines), a pod evicted or deleted mid-job (naming its phase and reason), and an unreachable plugin (`plugin k8s at unix:///…: …`). The runner always removes the environment when a job ends or is cancelled; `activeDeadlineSeconds` and `ttlSecondsAfterFinished` bound leaks even if the runner and plugin both die.
+Every failure shows up in the job log rather than hanging: a pod that does not become ready within `ready_timeout` (with its last condition and events), an image pull failing for over a minute, a service that keeps crashing (kubelet restarts native sidecars, so a service or `dind` sidecar gets up to 3 restarts, shown as `restarting (n/3)`, before the job fails with its last 50 log lines; the main container fails on its first exit), a pod evicted or deleted mid-job (naming its phase and reason), and an unreachable plugin (`plugin k8s at unix:///…: …`). The runner always removes the environment when a job ends or is cancelled; `activeDeadlineSeconds` and `ttlSecondsAfterFinished` bound leaks even if the runner and plugin both die.
 
 ## Compatibility with Forgejo
 

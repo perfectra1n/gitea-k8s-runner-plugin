@@ -57,6 +57,12 @@ type KubeBackend struct {
 	// PullFailAfter is how long an image-pull error may persist before
 	// WaitReady gives up (registries have transient hiccups).
 	PullFailAfter time.Duration
+	// SidecarRestartLimit is how many kubelet restarts of a native sidecar
+	// WaitReady tolerates before giving up. Kubelet restarts sidecars by
+	// design (a startupProbe that times out on a busy node kills a healthy
+	// dockerd), so one restart is not a failure; a sidecar needing more than
+	// this many is. Zero fails on the first exit, like the main container.
+	SidecarRestartLimit int32
 	// ServiceLogLines is how much of a crashing service's log is reported.
 	ServiceLogLines int64
 
@@ -74,14 +80,15 @@ func NewBackend(cs kubernetes.Interface, restCfg *rest.Config, ns string) (*Kube
 		return nil, fmt.Errorf("exec client: %w", err)
 	}
 	return &KubeBackend{
-		cs:              cs,
-		restCfg:         restCfg,
-		core:            core,
-		ns:              ns,
-		PollInterval:    time.Second,
-		PullFailAfter:   60 * time.Second,
-		ServiceLogLines: 50,
-		newExecutor:     newFallbackExecutor,
+		cs:                  cs,
+		restCfg:             restCfg,
+		core:                core,
+		ns:                  ns,
+		PollInterval:        time.Second,
+		PullFailAfter:       60 * time.Second,
+		SidecarRestartLimit: 3,
+		ServiceLogLines:     50,
+		newExecutor:         newFallbackExecutor,
 	}, nil
 }
 
@@ -238,7 +245,13 @@ func (b *KubeBackend) assess(ctx context.Context, pod *corev1.Pod, pullErrSince 
 				if w.Reason == "InvalidImageName" || w.Reason == "ErrImageNeverPull" || time.Since(first) >= b.PullFailAfter {
 					return false, "", fmt.Errorf("image pull failed for container %s: %s: %s", cs.Name, w.Reason, w.Message)
 				}
-			case "CrashLoopBackOff", "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+			case "CrashLoopBackOff":
+				if sidecars[cs.Name] && cs.RestartCount < b.SidecarRestartLimit {
+					notes = append(notes, b.sidecarRestarting(cs))
+					continue
+				}
+				return false, "", fmt.Errorf("container %s failed to start: %s: %s%s", cs.Name, w.Reason, w.Message, b.tailLogs(ctx, pod, cs.Name))
+			case "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
 				return false, "", fmt.Errorf("container %s failed to start: %s: %s%s", cs.Name, w.Reason, w.Message, b.tailLogs(ctx, pod, cs.Name))
 			default:
 				delete(pullErrSince, cs.Name)
@@ -248,6 +261,10 @@ func (b *KubeBackend) assess(ctx context.Context, pod *corev1.Pod, pullErrSince 
 		}
 		delete(pullErrSince, cs.Name)
 		if t := cs.State.Terminated; t != nil && (cs.Name == podspec.MainContainer || sidecars[cs.Name]) {
+			if sidecars[cs.Name] && cs.RestartCount < b.SidecarRestartLimit {
+				notes = append(notes, b.sidecarRestarting(cs))
+				continue
+			}
 			return false, "", fmt.Errorf("container %s exited during startup: code %d, %s %s%s",
 				cs.Name, t.ExitCode, t.Reason, t.Message, b.tailLogs(ctx, pod, cs.Name))
 		}
@@ -266,6 +283,12 @@ func (b *KubeBackend) assess(ctx context.Context, pod *corev1.Pod, pullErrSince 
 		state += "; " + strings.Join(notes, "; ")
 	}
 	return false, state, nil
+}
+
+// sidecarRestarting describes a native sidecar that exited and that kubelet
+// will restart; n counts the restart pending now.
+func (b *KubeBackend) sidecarRestarting(cs corev1.ContainerStatus) string {
+	return fmt.Sprintf("%s: restarting (%d/%d)", cs.Name, cs.RestartCount+1, b.SidecarRestartLimit)
 }
 
 func allReady(pod *corev1.Pod, sidecars map[string]bool) bool {
