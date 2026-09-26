@@ -67,6 +67,8 @@ The chart is built on the [bjw-s common library chart](https://github.com/bjw-s-
 | plugin.image.tag | string | `""` | Defaults to the chart appVersion. |
 | plugin.options | object | `{}` | Extra plugin options passed with every job (ready_timeout, image_pull_policy, service_resources, labels). |
 | plugin.resources | object | `{}` | Resources of the plugin sidecar. |
+| plugin.stepHelper.enabled | bool | `true` | Install the step helper from the plugin image into every job pod (a small init container). Steps then run detached from their exec stream, so a stream broken by an API server restart or a reset connection is resumed instead of failing the step. Job pods must be able to pull the plugin image. |
+| plugin.stepHelper.reattachTimeout | string | `"5m"` | How long a step's broken exec stream is retried without progress before the step fails. |
 | runner.capacity | int | `10` | Jobs run concurrently. Pods sit Pending under the cluster scheduler, so this can be high. |
 | runner.config | object | `{}` | Extra runner config merged into the generated config.yaml. |
 | runner.extraLabels | list | `[]` | Extra labels that do not use the plugin (e.g. "self-hosted:host"). |

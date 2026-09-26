@@ -45,6 +45,17 @@ type Backend interface {
 	Sweep(ctx context.Context, instance string) (int, error)
 }
 
+// ErrPodFinished marks an Exec error on a pod that is gone or has
+// terminated: retrying the exec cannot help.
+var ErrPodFinished = errors.New("pod finished")
+
+// podFinishedError keeps the message of the error it wraps while matching
+// ErrPodFinished.
+type podFinishedError struct{ error }
+
+func (e podFinishedError) Is(target error) bool { return target == ErrPodFinished }
+func (e podFinishedError) Unwrap() error        { return e.error }
+
 // KubeBackend implements Backend with client-go.
 type KubeBackend struct {
 	cs      kubernetes.Interface
@@ -394,19 +405,25 @@ func (b *KubeBackend) Exec(ctx context.Context, pod string, cmd []string, stdin 
 	case ctx.Err() != nil:
 		return -1, fmt.Errorf("exec cancelled: %w", ctx.Err())
 	}
-	return -1, fmt.Errorf("exec in pod %s: %w%s", pod, err, b.podState(ctx, pod))
+	state, finished := b.podState(ctx, pod)
+	err = fmt.Errorf("exec in pod %s: %w%s", pod, err, state)
+	if finished {
+		err = podFinishedError{err}
+	}
+	return -1, err
 }
 
-// podState explains why exec may have broken: the pod was deleted, evicted, ...
-func (b *KubeBackend) podState(ctx context.Context, pod string) string {
+// podState explains why exec may have broken: the pod was deleted, evicted,
+// ... finished reports that the pod will never run a command again.
+func (b *KubeBackend) podState(ctx context.Context, pod string) (state string, finished bool) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	p, err := b.cs.CoreV1().Pods(b.ns).Get(sctx, pod, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		return " (the pod no longer exists: deleted or evicted)"
+		return " (the pod no longer exists: deleted or evicted)", true
 	case err != nil:
-		return ""
+		return "", false
 	}
 	s := fmt.Sprintf(" (pod phase=%s", p.Status.Phase)
 	if p.Status.Reason != "" {
@@ -418,5 +435,6 @@ func (b *KubeBackend) podState(ctx context.Context, pod string) string {
 	if p.DeletionTimestamp != nil {
 		s += ", being deleted"
 	}
-	return s + ")"
+	finished = p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded
+	return s + ")", finished
 }

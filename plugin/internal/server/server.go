@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"runtime"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/k8s"
 	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/options"
 	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/podspec"
+	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/stepio"
 	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/tarx"
 )
 
@@ -44,6 +46,7 @@ const (
 	toolCachePath = rootPath + "/_tool"
 	tempPath      = rootPath + "/_temp"
 	pidDir        = rootPath + "/.gitea-k8s-runner-plugin"
+	stepDir       = pidDir + "/steps"
 	defaultPATH   = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 	backendName = "kubernetes"
@@ -51,6 +54,11 @@ const (
 	killGrace = 5
 	// stderrKeep bounds how much stderr of a copy command is kept for errors.
 	stderrKeep = 4096
+	// DefaultReattachTimeout bounds how long a step's broken exec stream is
+	// retried without progress before the step fails.
+	DefaultReattachTimeout = 5 * time.Minute
+	// maxReattachBackoff caps the wait between reattach attempts.
+	maxReattachBackoff = 10 * time.Second
 )
 
 // Server is the BackendPlugin implementation.
@@ -60,6 +68,14 @@ type Server struct {
 	backend     k8s.Backend
 	defaults    options.Defaults
 	loadPodspec func(string) (*corev1.PodSpec, error)
+
+	// ReattachTimeout bounds how long a step's broken exec stream is
+	// retried without progress (step helper only).
+	ReattachTimeout time.Duration
+	// Log receives reattach notices.
+	Log *slog.Logger
+	// reattachBackoff is the first wait between reattach attempts.
+	reattachBackoff time.Duration
 
 	mu   sync.Mutex
 	envs map[string]*environment
@@ -79,10 +95,13 @@ type environment struct {
 // New returns a server using backend, with defaults for unset options.
 func New(backend k8s.Backend, defaults options.Defaults) *Server {
 	return &Server{
-		backend:     backend,
-		defaults:    defaults,
-		loadPodspec: podspec.Load,
-		envs:        map[string]*environment{},
+		backend:         backend,
+		defaults:        defaults,
+		loadPodspec:     podspec.Load,
+		ReattachTimeout: DefaultReattachTimeout,
+		Log:             slog.Default(),
+		reattachBackoff: 500 * time.Millisecond,
+		envs:            map[string]*environment{},
 	}
 }
 
@@ -123,6 +142,7 @@ func (s *Server) Create(_ context.Context, req *pluginv1.CreateRequest) (*plugin
 		Labels:           opts.Labels,
 		PullPolicy:       opts.PullPolicy,
 		ServiceResources: opts.ServiceResources,
+		HelperImage:      s.defaults.StepHelperImage,
 	}
 	// Validate now so a bad podspec/service fails Create, not Start.
 	if _, err := podspec.BuildJob(in); err != nil {
@@ -342,9 +362,18 @@ func (s *Server) Exec(req *pluginv1.ExecRequest, stream pluginv1.BackendPlugin_E
 		})
 	}
 
-	pidfile := fmt.Sprintf("%s/exec-%d.pid", pidDir, s.seq.Add(1))
-	argv := execwrap.Wrap(req.GetCommand(), req.GetEnv(), req.GetWorkdir(), pidfile)
-	code, err := s.backend.Exec(ctx, e.pod, argv, nil, send(pluginv1.DataChunk_STDOUT), send(pluginv1.DataChunk_STDERR))
+	n := s.seq.Add(1)
+	pidfile := fmt.Sprintf("%s/exec-%d.pid", pidDir, n)
+	stdout, stderr := send(pluginv1.DataChunk_STDOUT), send(pluginv1.DataChunk_STDERR)
+	var code int
+	if e.in.HelperImage != "" {
+		dir := fmt.Sprintf("%s/%d", stepDir, n)
+		argv := stepio.RunArgv(podspec.HelperPath, dir, pidfile, req.GetWorkdir(), req.GetEnv(), req.GetCommand())
+		code, err = s.runStep(ctx, e.pod, dir, argv, stdout, stderr)
+	} else {
+		argv := execwrap.Wrap(req.GetCommand(), req.GetEnv(), req.GetWorkdir(), pidfile)
+		code, err = s.backend.Exec(ctx, e.pod, argv, nil, stdout, stderr)
+	}
 	if ctx.Err() != nil {
 		// Cancelled (job cancelled, step timeout): closing the exec stream
 		// does not reliably kill the remote process, so kill it explicitly.
@@ -357,6 +386,63 @@ func (s *Server) Exec(req *pluginv1.ExecRequest, stream pluginv1.BackendPlugin_E
 		return fail(err.Error())
 	}
 	return stream.Send(&pluginv1.ExecOutput{Output: &pluginv1.ExecOutput_ExecComplete{ExecComplete: &pluginv1.ExecComplete{ExitCode: int32(code)}}}) //nolint:gosec // G115: exit codes fit in int32
+}
+
+// runStep runs a step under the step helper and returns its exit code. The
+// step runs detached from the exec stream, so when the stream breaks (an API
+// server restart, a reset connection) its log is followed again from the
+// last byte received. Only the helper's exit record ends the step; an error
+// means its outcome could not be learned: the pod finished, the step's
+// process vanished, or reattaching made no progress for ReattachTimeout.
+func (s *Server) runStep(ctx context.Context, pod, dir string, run []string, stdout, stderr io.Writer) (int, error) {
+	var decErr error
+	dec := &stepio.Decoder{Stdout: stdout, Stderr: stderr}
+	sink := writerFunc(func(p []byte) (int, error) {
+		n, err := dec.Write(p)
+		if err != nil && decErr == nil {
+			decErr = err
+		}
+		return n, err
+	})
+	argv := run
+	deadline := time.Now().Add(s.ReattachTimeout)
+	for fails := 0; ; fails++ {
+		var helperErr limitedBuffer
+		before := dec.Offset()
+		code, err := s.backend.Exec(ctx, pod, argv, nil, sink, &helperErr)
+		if exit, ok := dec.Exit(); ok {
+			return exit, nil
+		}
+		switch {
+		case ctx.Err() != nil:
+			return -1, err
+		case decErr != nil:
+			return -1, fmt.Errorf("step output: %w", decErr)
+		case err == nil:
+			return -1, fmt.Errorf("step helper exited %d without the step's exit code: %s", code, helperErr.String())
+		case errors.Is(err, k8s.ErrPodFinished), missingBinary(err):
+			return -1, err
+		}
+		if dec.Offset() > before {
+			deadline, fails = time.Now().Add(s.ReattachTimeout), 0
+		}
+		if time.Now().After(deadline) {
+			return -1, fmt.Errorf("%w; gave up resuming the step after %s without progress", err, s.ReattachTimeout)
+		}
+		s.Log.Warn("step exec stream broke; resuming", "pod", pod, "dir", dir, "offset", dec.Offset(), "err", err)
+		wait := min(s.reattachBackoff<<min(fails, 16), maxReattachBackoff)
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-time.After(wait):
+		}
+		// Until output arrives the step may not have started: run again,
+		// which starts it or, when it already started, follows it.
+		argv = run
+		if dec.Offset() > 0 {
+			argv = stepio.FollowArgv(podspec.HelperPath, dir, dec.Offset())
+		}
+	}
 }
 
 func (s *Server) CopyIn(stream pluginv1.BackendPlugin_CopyInServer) error {

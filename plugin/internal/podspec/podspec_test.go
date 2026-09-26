@@ -359,3 +359,71 @@ func TestSharedMountAtOtherPathIsMoved(t *testing.T) {
 		t.Error("input podspec was mutated")
 	}
 }
+
+func TestStepHelperInstalledFirstAndMountedReadOnly(t *testing.T) {
+	j := build(t, BuildInput{
+		Spec:        mustSpec(t, plain+"initContainers: [{name: dind, image: docker:dind, restartPolicy: Always}]\n"),
+		HelperImage: "ghcr.io/perfectra1n/gitea-k8s-runner-plugin:1.2.3",
+		Services:    []Service{{Name: "db", Image: "postgres:17"}},
+	})
+	ps := j.Spec.Template.Spec
+	if got := names(ps.InitContainers); !reflect.DeepEqual(got, []string{HelperContainer, "dind", "svc-db"}) {
+		t.Fatalf("init containers = %v", got)
+	}
+	h := ps.InitContainers[0]
+	if h.Image != "ghcr.io/perfectra1n/gitea-k8s-runner-plugin:1.2.3" || h.RestartPolicy != nil {
+		t.Errorf("helper container = %+v", h)
+	}
+	if want := []string{helperImageBinary, "install", HelperPath}; !reflect.DeepEqual(h.Command, want) {
+		t.Errorf("helper command = %q, want %q", h.Command, want)
+	}
+	if sc := h.SecurityContext; sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot || sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		t.Errorf("helper security context = %+v", sc)
+	}
+	var vol *corev1.Volume
+	for i := range ps.Volumes {
+		if ps.Volumes[i].Name == HelperVolume {
+			vol = &ps.Volumes[i]
+		}
+	}
+	if vol == nil || vol.EmptyDir == nil {
+		t.Fatalf("no emptyDir %q in %+v", HelperVolume, ps.Volumes)
+	}
+	mountIn := func(c corev1.Container) *corev1.VolumeMount {
+		for i := range c.VolumeMounts {
+			if c.VolumeMounts[i].Name == HelperVolume {
+				return &c.VolumeMounts[i]
+			}
+		}
+		return nil
+	}
+	if m := mountIn(h); m == nil || m.MountPath != HelperMount || m.ReadOnly {
+		t.Errorf("helper mount = %+v", m)
+	}
+	if m := mountIn(container(t, ps.Containers, MainContainer)); m == nil || m.MountPath != HelperMount || !m.ReadOnly {
+		t.Errorf("main mount = %+v", m)
+	}
+}
+
+func TestNoStepHelperWithoutImage(t *testing.T) {
+	ps := build(t, BuildInput{Spec: mustSpec(t, plain)}).Spec.Template.Spec
+	if len(ps.InitContainers) != 0 {
+		t.Errorf("init containers = %v", names(ps.InitContainers))
+	}
+	for _, v := range ps.Volumes {
+		if v.Name == HelperVolume {
+			t.Errorf("unexpected volume %q", v.Name)
+		}
+	}
+}
+
+func TestStepHelperNameClash(t *testing.T) {
+	_, err := BuildJob(BuildInput{
+		Spec:        mustSpec(t, plain+"initContainers: [{name: "+HelperContainer+", image: x}]\n"),
+		EnvID:       "gk-1",
+		HelperImage: "img",
+	})
+	if err == nil {
+		t.Fatal("no error for a podspec container named like the helper")
+	}
+}

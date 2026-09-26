@@ -46,6 +46,16 @@ plugin:
   # -- Extra plugin options passed with every job (ready_timeout,
   # image_pull_policy, service_resources, labels).
   options: {}
+  stepHelper:
+    # -- Install the step helper from the plugin image into every job pod (a
+    # small init container). Steps then run detached from their exec stream,
+    # so a stream broken by an API server restart or a reset connection is
+    # resumed instead of failing the step. Job pods must be able to pull the
+    # plugin image.
+    enabled: true
+    # -- How long a step's broken exec stream is retried without progress
+    # before the step fails.
+    reattachTimeout: 5m
   # -- Resources of the plugin sidecar.
   resources: {}
 

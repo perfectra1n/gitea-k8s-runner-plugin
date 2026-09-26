@@ -480,9 +480,25 @@ func TestExecTransportErrorNamesPodState(t *testing.T) {
 			t.Errorf("error %q lacks %q", err, want)
 		}
 	}
+	if !errors.Is(err, ErrPodFinished) {
+		t.Errorf("failed pod: %v is not ErrPodFinished", err)
+	}
 	_, err = b.Exec(context.Background(), "gone", []string{"true"}, nil, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "no longer exists") {
+	if err == nil || !strings.Contains(err.Error(), "no longer exists") || !errors.Is(err, ErrPodFinished) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// A running pod's broken stream is worth resuming: not ErrPodFinished.
+func TestExecTransportErrorOnRunningPod(t *testing.T) {
+	pod := withStatus(basePod(), corev1.PodStatus{Phase: corev1.PodRunning})
+	b, _ := newTestBackend(t, pod)
+	b.newExecutor = func(*rest.Config, *url.URL) (remotecommand.Executor, error) {
+		return &fakeExecutor{run: func(remotecommand.StreamOptions) error { return errors.New("connection reset") }}, nil
+	}
+	_, err := b.Exec(context.Background(), pod.Name, []string{"true"}, nil, io.Discard, io.Discard)
+	if err == nil || errors.Is(err, ErrPodFinished) || !strings.Contains(err.Error(), "pod phase=Running") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

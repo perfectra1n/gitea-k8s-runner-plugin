@@ -41,6 +41,8 @@ type config struct {
 	kubeconfig string
 	socketMode os.FileMode
 	defaults   options.Defaults
+	// reattachTimeout bounds retrying a step's broken exec stream.
+	reattachTimeout time.Duration
 }
 
 func main() { os.Exit(realMain()) }
@@ -89,6 +91,8 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	fs.StringVar(&cfg.defaults.Instance, "instance", getenv("POD_NAME"), "owner label value for orphan sweeping (default: the pod name)")
 	fs.StringVar(&cfg.defaults.Podspec, "podspec", "", "default podspec path when a label has no argument")
 	fs.DurationVar(&cfg.defaults.ReadyTimeout, "ready-timeout", options.DefaultReadyTimeout, "default create-to-ready bound")
+	fs.StringVar(&cfg.defaults.StepHelperImage, "step-helper-image", "", "image carrying the step helper (normally this plugin's image); installed into job pods so a step survives a broken exec stream. Empty runs steps directly over exec")
+	fs.DurationVar(&cfg.reattachTimeout, "reattach-timeout", server.DefaultReattachTimeout, "how long a step's broken exec stream is retried without progress before the step fails (with --step-helper-image)")
 	fs.StringVar(&mode, "socket-mode", "0660", "permissions of the unix socket")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -101,6 +105,9 @@ func parseFlags(args []string, getenv func(string) string) (config, error) {
 	}
 	if cfg.defaults.Instance == "" {
 		return config{}, errors.New("no instance: pass --instance or set POD_NAME")
+	}
+	if cfg.reattachTimeout <= 0 {
+		return config{}, fmt.Errorf("--reattach-timeout must be positive, got %s", cfg.reattachTimeout)
 	}
 	m, err := strconv.ParseUint(mode, 8, 32)
 	if err != nil {
@@ -158,6 +165,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return err
 	}
 	srv := server.New(backend, cfg.defaults)
+	srv.ReattachTimeout = cfg.reattachTimeout
+	srv.Log = log
 	gs := grpc.NewServer()
 	pluginv1.RegisterBackendPluginServer(gs, srv)
 	hs := health.NewServer()
@@ -165,7 +174,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- gs.Serve(lis) }()
-	log.Info("serving", "listen", cfg.listen, "namespace", cfg.defaults.Namespace, "instance", cfg.defaults.Instance)
+	log.Info("serving", "listen", cfg.listen, "namespace", cfg.defaults.Namespace, "instance", cfg.defaults.Instance,
+		"step_helper_image", cfg.defaults.StepHelperImage)
 
 	select {
 	case err := <-serveErr:

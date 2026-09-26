@@ -17,8 +17,11 @@ runner_ns=ci-runner
 timeout_s=${E2E_TIMEOUT:-1800}
 work=$(mktemp -d)
 
-kubectl -n gitea port-forward svc/gitea "$port:3000" >"$work/port-forward.log" 2>&1 &
-pf=$!
+forward() {
+  kubectl -n gitea port-forward svc/gitea "$port:3000" >>"$work/port-forward.log" 2>&1 &
+  pf=$!
+}
+forward
 cleanup() {
   kill "$pf" 2>/dev/null || true
   rm -rf "$work"
@@ -80,6 +83,8 @@ printf 'first\n' >"$work/first"
 add cancel-trigger/first "$work/first"
 nworkflows=0
 for _ in "$root"/examples/workflows/*.yaml "$root"/test/e2e/workflows/*.yaml; do nworkflows=$((nworkflows + 1)); done
+# Workflows only run by dispatch (resume.yaml) are not triggered by pushes.
+ndispatch=$(grep -l '^on: workflow_dispatch$' "$root"/test/e2e/workflows/*.yaml | wc -l | tr -d ' ')
 log "pushing $nworkflows workflows"
 api POST "/repos/$repo/contents" "{\"branch\":\"main\",\"message\":\"e2e: add workflows\",\"files\":[${files%,}]}" >/dev/null
 
@@ -104,7 +109,7 @@ add cancel-trigger/second "$work/second"
 api POST "/repos/$repo/contents" "{\"branch\":\"main\",\"message\":\"e2e: cancel-now\",\"files\":[${files%,}]}" >/dev/null
 
 # Both pushes trigger every workflow (cancel.yaml by its path filter).
-want_runs=$((nworkflows * 2))
+want_runs=$(((nworkflows - ndispatch) * 2))
 log "waiting for all $want_runs runs to complete (timeout ${timeout_s}s)"
 deadline=$(($(date +%s) + timeout_s))
 while :; do
@@ -153,6 +158,58 @@ if [ "$left" = 0 ]; then
   echo "ok   no job pods left behind (cancellation removed its Job)"
 else
   echo "FAIL $left Job(s) left in $jobs_ns"
+  failures=$((failures + 1))
+fi
+
+# A step whose exec stream breaks must be resumed, not failed. Restarting the
+# kube-apiserver breaks every exec stream, like the API server restarts and
+# reset connections that drop them in real clusters. Nothing else runs now.
+log "resume: dispatching resume.yaml"
+api POST "/repos/$repo/actions/workflows/resume.yaml/dispatches" '{"ref":"main"}' >/dev/null
+log "resume: waiting for the step to be printing"
+deadline=$(($(date +%s) + 600))
+while :; do
+  pod=$(kubectl get pods -n "$jobs_ns" -o name | grep workflow-resume | head -1 || true)
+  [ -n "$pod" ] && kubectl exec -n "$jobs_ns" "$pod" -c main -- \
+    sh -c 'grep -qs "tick 10" /__w/.gitea-k8s-runner-plugin/steps/*/log' 2>/dev/null && break
+  [ "$(date +%s)" -lt "$deadline" ] || fail "the resume step never started printing"
+  sleep 2
+done
+node="${E2E_CLUSTER:-gitea-k8s-e2e}-control-plane"
+log "resume: restarting the kube-apiserver on $node"
+docker exec "$node" sh -c 'crictl stop $(crictl ps -q --name kube-apiserver)' >/dev/null
+kill "$pf" 2>/dev/null || true
+sleep 5
+for _ in $(seq 90); do
+  kubectl get --raw /readyz >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl get --raw /readyz >/dev/null 2>&1 || fail "the kube-apiserver did not come back"
+forward
+for _ in $(seq 30); do
+  curl -sf "$gitea/api/healthz" >/dev/null 2>&1 && break
+  sleep 2
+done
+deadline=$(($(date +%s) + 600))
+while :; do
+  st=$(runs_of 'resume.yaml' | head -1 | json -r '.status' 2>/dev/null || true)
+  [ "$st" = completed ] && break
+  [ "$(date +%s)" -lt "$deadline" ] || fail "the resume run did not complete (status: ${st:-none})"
+  sleep 5
+done
+expect resume.yaml 0 success
+resume_job=$(api GET "/repos/$repo/actions/jobs?limit=100" | json -r '[.jobs[] | select(.name == "ticks") | .id] | .[0]')
+ticks=$(api GET "/repos/$repo/actions/jobs/$resume_job/logs" | grep -oE 'tick [0-9]+' | awk '{print $2}' | tr '\n' ' ')
+if [ "$ticks" = "$(seq 1 90 | tr '\n' ' ')" ]; then
+  echo "ok   every tick logged exactly once, in order, across the restart"
+else
+  echo "FAIL ticks logged: $ticks"
+  failures=$((failures + 1))
+fi
+if kubectl -n "$runner_ns" logs deploy/runner-gitea-runner-k8s -c plugin | grep -q 'step exec stream broke; resuming'; then
+  echo "ok   the plugin resumed the broken step stream"
+else
+  echo "FAIL the plugin never resumed a step stream (did the restart break it?)"
   failures=$((failures + 1))
 fi
 

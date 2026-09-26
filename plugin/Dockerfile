@@ -11,9 +11,12 @@ COPY gen/ gen/
 COPY plugin/ plugin/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-plugin
+    go build -trimpath -ldflags="-s -w" -o /out/ ./plugin/cmd/gitea-k8s-runner-plugin ./plugin/cmd/gitea-k8s-runner-step
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/gitea-k8s-runner-plugin /usr/local/bin/gitea-k8s-runner-plugin
+# Installed into job pods by the plugin (--step-helper-image): static, so any
+# job image can run it.
+COPY --from=build /out/gitea-k8s-runner-step /usr/local/bin/gitea-k8s-runner-step
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/gitea-k8s-runner-plugin"]

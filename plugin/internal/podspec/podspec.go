@@ -30,6 +30,17 @@ const (
 	// ServicePrefix prefixes the sidecar name of each workflow service.
 	ServicePrefix = "svc-"
 
+	// HelperContainer is the init container that installs the step helper.
+	HelperContainer = "gitea-k8s-runner-step"
+	// HelperVolume holds the step helper binary.
+	HelperVolume = "gitea-k8s-runner-step"
+	// HelperMount is where HelperVolume is mounted, read-only in main.
+	HelperMount = "/__gitea-k8s-runner-step"
+	// HelperPath is the step helper binary as main sees it.
+	HelperPath = HelperMount + "/gitea-k8s-runner-step"
+	// helperImageBinary is the step helper inside the plugin image.
+	helperImageBinary = "/usr/local/bin/gitea-k8s-runner-step"
+
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 	ManagedByValue = "gitea-k8s-runner-plugin"
 	LabelInstance  = "gitea-k8s-runner-plugin/instance"
@@ -67,6 +78,10 @@ type BuildInput struct {
 	Labels           map[string]string
 	PullPolicy       corev1.PullPolicy
 	ServiceResources *corev1.ResourceRequirements
+	// HelperImage, when set, is an image carrying the step helper (the
+	// plugin's own); it is installed into main so steps survive a broken
+	// exec stream.
+	HelperImage string
 }
 
 // Load reads a podspec file (a corev1.PodSpec in YAML). Unknown fields are
@@ -95,6 +110,9 @@ func BuildJob(in BuildInput) (*batchv1.Job, error) {
 		return nil, err
 	}
 	if err := addServices(ps, in); err != nil {
+		return nil, err
+	}
+	if err := addHelper(ps, in.HelperImage); err != nil {
 		return nil, err
 	}
 	addSharedVolume(ps)
@@ -248,6 +266,60 @@ func dnsLabel(s string) string {
 		out = "service"
 	}
 	return out
+}
+
+// addHelper installs the step helper into an emptyDir that main mounts
+// read-only. It runs before every other init container, so it is in place by
+// the time main starts; the binary is static, so main's image needs nothing.
+func addHelper(ps *corev1.PodSpec, image string) error {
+	if image == "" {
+		return nil
+	}
+	for _, c := range append(append([]corev1.Container(nil), ps.InitContainers...), ps.Containers...) {
+		if c.Name == HelperContainer {
+			return fmt.Errorf("podspec container name %q is reserved for the step helper", HelperContainer)
+		}
+	}
+	for _, v := range ps.Volumes {
+		if v.Name == HelperVolume {
+			return fmt.Errorf("podspec volume name %q is reserved for the step helper", HelperVolume)
+		}
+	}
+	size := resource.MustParse("64Mi")
+	ps.Volumes = append(ps.Volumes, corev1.Volume{
+		Name:         HelperVolume,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &size}},
+	})
+	install := corev1.Container{
+		Name:            HelperContainer,
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{helperImageBinary, "install", HelperPath},
+		VolumeMounts:    []corev1.VolumeMount{{Name: HelperVolume, MountPath: HelperMount}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+		},
+		// The emptyDir is world-writable and the installed binary
+		// world-executable, so any non-root user works for any step user.
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             ptr.To(true),
+			RunAsUser:                ptr.To[int64](65532),
+			RunAsGroup:               ptr.To[int64](65532),
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+	}
+	ps.InitContainers = append([]corev1.Container{install}, ps.InitContainers...)
+	for i := range ps.Containers {
+		if ps.Containers[i].Name == MainContainer {
+			ps.Containers[i].VolumeMounts = append(ps.Containers[i].VolumeMounts,
+				corev1.VolumeMount{Name: HelperVolume, MountPath: HelperMount, ReadOnly: true})
+		}
+	}
+	return nil
 }
 
 func addSharedVolume(ps *corev1.PodSpec) {

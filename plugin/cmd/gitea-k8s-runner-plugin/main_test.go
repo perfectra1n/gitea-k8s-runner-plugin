@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/server"
 )
 
 func TestParseListen(t *testing.T) {
@@ -42,5 +44,20 @@ func TestParseFlagsDefaultsFromEnv(t *testing.T) {
 	cfg, err = parseFlags([]string{"--namespace", "jobs", "--instance", "a"}, func(string) string { return "" })
 	if err != nil || cfg.defaults.Namespace != "jobs" || cfg.defaults.Instance != "a" {
 		t.Errorf("explicit flags: %+v %v", cfg, err)
+	}
+}
+
+func TestParseFlagsStepHelper(t *testing.T) {
+	env := func(string) string { return "x" }
+	cfg, err := parseFlags(nil, env)
+	if err != nil || cfg.defaults.StepHelperImage != "" || cfg.reattachTimeout != server.DefaultReattachTimeout {
+		t.Fatalf("defaults: %+v %v", cfg, err)
+	}
+	cfg, err = parseFlags([]string{"--step-helper-image", "ghcr.io/x/p:1", "--reattach-timeout", "90s"}, env)
+	if err != nil || cfg.defaults.StepHelperImage != "ghcr.io/x/p:1" || cfg.reattachTimeout != 90*time.Second {
+		t.Fatalf("set: %+v %v", cfg, err)
+	}
+	if _, err := parseFlags([]string{"--reattach-timeout", "0s"}, env); err == nil {
+		t.Error("a zero reattach timeout should be an error")
 	}
 }
