@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/perfectra1n/gitea-k8s-runner-plugin/compare/v0.1.1...v0.1.2) (2026-09-27)
+
+
+### Features
+
+* **plugin:** resume step exec streams through a step helper ([a33b1d0](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/a33b1d023d72d6dd26a38ebabfb1c0d5432d0bc8))
+* **plugin:** resume step exec streams through a step helper ([f71bbf4](https://github.com/perfectra1n/gitea-k8s-runner-plugin/commit/f71bbf45c195cfc596200685b6f7a34d6b716150))
+
 ## [0.1.1](https://github.com/perfectra1n/gitea-k8s-runner-plugin/compare/v0.1.0...v0.1.1) (2026-09-24)
 
 
