@@ -105,12 +105,21 @@ const testPodspec = "containers: [{name: main, image: ghcr.io/catthehacker/ubunt
 
 func setup(t *testing.T, fb *fakeBackend) (pluginv1.BackendPluginClient, *Server) {
 	t.Helper()
+	return setupWith(t, fb, nil)
+}
+
+// setupWith is setup with the server adjusted by configure before it serves.
+func setupWith(t *testing.T, fb *fakeBackend, configure func(*Server)) (pluginv1.BackendPluginClient, *Server) {
+	t.Helper()
 	dir := t.TempDir()
 	ps := filepath.Join(dir, "podspec.yaml")
 	if err := os.WriteFile(ps, []byte(testPodspec), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv := New(fb, options.Defaults{Namespace: "ci", Instance: "r0", Podspec: ps})
+	if configure != nil {
+		configure(srv)
+	}
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
 	pluginv1.RegisterBackendPluginServer(gs, srv)

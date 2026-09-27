@@ -85,6 +85,13 @@ check "jobNamespace defaults to the release namespace" "$out/existing.yaml" '[se
 check "default class on the act image" "$out/existing.yaml" \
   '[select(.kind == "ConfigMap" and .metadata.name == "r-gitea-runner-k8s-config") | .data["config.yaml"] | from_yaml | .runner.labels[] | select(. == "ubuntu-latest:k8s:/podspecs/default/podspec.yaml")] | length == 1'
 
+check "step helper: plugin installs its own image into job pods" "$out/existing.yaml" \
+  "[select(.kind == \"Deployment\") | .spec.template.spec.initContainers[] | select(.name == \"plugin\") | (.args | contains([\"--step-helper-image=ghcr.io/perfectra1n/gitea-k8s-runner-plugin:$(yq '.appVersion' "$chart/Chart.yaml")\", \"--reattach-timeout=5m\"]))] | all"
+
+render nohelper --set gitea.url=https://g --set gitea.token=x --set plugin.stepHelper.enabled=false
+check "step helper: can be turned off" "$out/nohelper.yaml" \
+  '[select(.kind == "Deployment") | .spec.template.spec.initContainers[] | select(.name == "plugin") | .args[] | select(test("^--(step-helper-image|reattach-timeout)="))] | length == 0'
+
 render override -f "$chart/tests/values-test.yaml" --set controllers.main.pod.priorityClassName=ci-runner
 check "bjw-s keys set by the user win" "$out/override.yaml" '[select(.kind == "Deployment") | .spec.template.spec.priorityClassName == "ci-runner"] | all'
 

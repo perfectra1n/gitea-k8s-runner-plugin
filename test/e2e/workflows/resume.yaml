@@ -1,0 +1,12 @@
+# Dispatched by the harness once every other run has finished. While the step
+# prints, the harness restarts the kube-apiserver, which breaks the step's
+# exec stream (as an API server restart or a reset connection does in a real
+# cluster). The step helper must resume it: the job succeeds and every tick
+# reaches the log exactly once, in order.
+name: resume
+on: workflow_dispatch
+jobs:
+  ticks:
+    runs-on: ubuntu-latest
+    steps:
+      - run: for i in $(seq 1 90); do echo "tick $i"; sleep 1; done

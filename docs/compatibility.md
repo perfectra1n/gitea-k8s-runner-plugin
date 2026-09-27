@@ -11,7 +11,7 @@ The protocol in [`proto/plugin/v1alpha/plugin.proto`](../proto/plugin/v1alpha/pl
 ## Semantics this implementation follows
 
 - Per environment the runner issues one RPC at a time; a cancelled stream (job cancelled, step timed out) may be followed immediately by `Remove`. The plugin serialises RPCs per environment and, when an `Exec` stream is cancelled, kills the running command and every process it started.
-- `Exec` ends with `ExecComplete{exit_code}` when the command ran, whatever its exit code, and with `ExecFailed{error_message}` only when it could not be run (pod gone, exec transport broken, unsupported `user`).
+- `Exec` ends with `ExecComplete{exit_code}` when the command ran, whatever its exit code, and with `ExecFailed{error_message}` only when it could not be run or its outcome could not be learned (pod gone, the step's process vanished, exec transport broken, unsupported `user`). With the step helper, a broken exec transport is resumed from the last byte received instead; it only fails the step once reattaching has made no progress for `--reattach-timeout`. Output is delivered exactly once either way.
 - `CopyIn`: only the first chunk carries `environment_id` and `dest_path`; later chunks that set them are rejected with `InvalidArgument`. The destination directory is created if missing.
 - `CopyOut` streams a tar whose top-level entry is the base name of `src_path`, matching `docker cp`; a missing path is `NotFound`.
 - `Remove` is idempotent, including for environment ids the plugin process never saw: after a plugin restart it deletes the Job by name, but only if the Job carries this plugin instance's labels, so instances sharing a namespace never remove each other's jobs.

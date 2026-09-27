@@ -5,9 +5,9 @@
 package execwrap
 
 import (
-	"sort"
 	"strconv"
-	"strings"
+
+	"github.com/perfectra1n/gitea-k8s-runner-plugin/plugin/internal/stepio"
 )
 
 // wrapScript: $1 pidfile ("" = none), $2 workdir ("" = unchanged), then
@@ -23,17 +23,8 @@ exec env "$@"`
 // in pidfile when set. Every value is its own argument, so nothing is ever
 // re-parsed by the shell.
 func Wrap(cmd []string, env map[string]string, workdir, pidfile string) []string {
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		if validName(k) {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
 	argv := []string{"/bin/sh", "-c", wrapScript, "sh", pidfile, workdir}
-	for _, k := range keys {
-		argv = append(argv, k+"="+env[k])
-	}
+	argv = append(argv, stepio.EnvArgs(env)...)
 	return append(argv, cmd...)
 }
 
@@ -58,9 +49,4 @@ kill -KILL $pids 2>/dev/null
 rm -f "$1"
 exit 0`
 	return []string{"/bin/sh", "-c", script, "sh", pidfile, strconv.Itoa(grace)}
-}
-
-// validName reports whether env(1) will treat name=value as an assignment.
-func validName(k string) bool {
-	return k != "" && !strings.ContainsAny(k, "=\x00")
 }

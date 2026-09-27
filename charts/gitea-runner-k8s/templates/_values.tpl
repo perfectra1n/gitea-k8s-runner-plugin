@@ -86,6 +86,10 @@ controllers:
           # Stable across pod restarts, so a new pod sweeps the old one's orphans.
           - --instance={{ $fullname }}
           - --ready-timeout={{ .Values.plugin.options.ready_timeout | default "10m" }}
+          {{- if .Values.plugin.stepHelper.enabled }}
+          - --step-helper-image={{ .Values.plugin.image.repository }}:{{ .Values.plugin.image.tag | default .Chart.AppVersion }}
+          - --reattach-timeout={{ .Values.plugin.stepHelper.reattachTimeout }}
+          {{- end }}
         {{- with .Values.plugin.resources }}
         resources: {{- toYaml . | nindent 10 }}
         {{- end }}

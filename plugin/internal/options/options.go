@@ -46,6 +46,10 @@ type Defaults struct {
 	Podspec      string
 	Instance     string
 	ReadyTimeout time.Duration
+	// StepHelperImage carries the step helper (normally the plugin's own
+	// image). Empty runs steps directly over exec, which fails a step whose
+	// exec stream breaks.
+	StepHelperImage string
 }
 
 // Parse merges raw backend options over the defaults. Unknown keys are errors
